@@ -241,8 +241,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const textExtensions = [
             '.txt', '.md', '.py', '.js', '.css', '.html', '.json',
             '.xml', '.yml', '.yaml', '.sh', '.bat', '.log', '.csv',
-            '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.java', '.rb',
-            '.php', '.sql', '.toml', '.ini', '.cfg', '.conf'
+            '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.hpp', '.cc', '.cxx',
+            '.java', '.rb', '.php', '.sql', '.toml', '.ini', '.cfg', '.conf'
         ];
 
         fileItems.forEach(async (itemDiv) => {
