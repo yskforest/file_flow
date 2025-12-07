@@ -22,22 +22,29 @@ body {
     font-family: 'Inter', sans-serif;
     background-color: var(--bg-color);
     color: var(--text-primary);
-    min-height: 100vh;
+    height: 100vh;
+    /* Fixed full height */
     display: flex;
     justify-content: center;
-    padding: 2rem;
+    padding: 1rem;
+    /* Reduced padding */
+    overflow: hidden;
+    /* Prevent body scroll */
 }
 
 .app-container {
     width: 100%;
-    max-width: 800px;
+    /* max-width removed to fill screen */
     display: flex;
     flex-direction: column;
-    gap: 2rem;
+    gap: 1rem;
+    height: 100%;
 }
 
 header {
     text-align: center;
+    flex-shrink: 0;
+    /* Header doesn't shrink */
 }
 
 header h1 {
@@ -53,6 +60,17 @@ header p {
     color: var(--text-secondary);
 }
 
+main {
+    flex: 1;
+    /* Main takes all remaining space */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* Contain inner scroll */
+    min-height: 0;
+    /* Flexbox scrolling fix */
+}
+
 .drop-zone {
     background-color: var(--drop-zone-bg);
     border: 2px dashed var(--border-color);
@@ -63,6 +81,7 @@ header p {
     justify-content: center;
     transition: all 0.3s ease;
     cursor: pointer;
+    flex-shrink: 0;
 }
 
 .drop-zone.drag-over {
@@ -79,7 +98,6 @@ header p {
     text-align: center;
     color: var(--text-secondary);
     pointer-events: none;
-    /* Let clicks pass through to container if needed */
 }
 
 .upload-icon {
@@ -90,27 +108,30 @@ header p {
 .file-list-container {
     background-color: var(--card-bg);
     border-radius: 1rem;
-    padding: 1.5rem;
+    padding: 1rem;
     border: 1px solid var(--border-color);
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    opacity: 1;
-    transform: translateY(0);
-    transition: opacity 0.3s ease, transform 0.3s ease;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    /* Take all space in main */
+    overflow: hidden;
+    /* Important for inner scroll */
+    min-height: 0;
 }
 
 .file-list-container.hidden {
-    display: none;
-    opacity: 0;
-    transform: translateY(10px);
+    display: none !important;
 }
 
 .list-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: 0.5rem;
     padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
 }
 
 .toolbar {
@@ -220,8 +241,11 @@ header p {
 
 .file-tree {
     list-style: none;
-    max-height: 500px;
+    flex-grow: 1;
+    /* Grow to fill remaining space */
     overflow-y: auto;
+    /* Scroll ONLY the list */
+    padding-right: 0.5rem;
 }
 
 .file-tree li {

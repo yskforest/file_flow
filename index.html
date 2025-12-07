@@ -102,70 +102,73 @@
                 <ul id="file-list" class="file-tree"></ul>
             </div>
         </main>
-    </div>
-
-    <!-- Settings Modal -->
-    <div id="settings-modal" class="modal hidden">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Settings</h3>
-                <button id="close-settings-btn" class="icon-btn">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-                </button>
-            </div>
-            <div class="modal-body">
-                <div class="setting-group">
-                    <h4>Action Mode</h4>
-                    <label class="setting-item radio">
-                        <input type="radio" name="action-mode" value="md" checked>
-                        <span>Add .md extension</span>
-                    </label>
-                    <label class="setting-item radio">
-                        <input type="radio" name="action-mode" value="txt">
-                        <span>Add .txt extension</span>
-                    </label>
+        <!-- Settings Modal -->
+        <div id="settings-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Settings</h3>
+                    <button id="close-settings-btn" class="icon-btn">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
                 </div>
+                <div class="modal-body">
+                    <div class="setting-group">
+                        <h4>Action Mode</h4>
+                        <label class="setting-item radio">
+                            <input type="radio" name="action-mode" value="md" checked>
+                            <span>Add .md extension</span>
+                        </label>
+                        <label class="setting-item radio">
+                            <input type="radio" name="action-mode" value="txt">
+                            <span>Add .txt extension</span>
+                        </label>
+                        <label class="setting-item radio">
+                            <input type="radio" id="mode-detect" name="action-mode" value="detect">
+                            <label for="mode-detect">Detect Info (Encoding/EOL)</label>
+                        </label>
+                    </div>
 
-                <div class="setting-group">
-                    <h4>Filters</h4>
-                    <label class="setting-item">
-                        <input type="checkbox" id="exclude-dots-checkbox" checked>
-                        <span>Exclude files/folders starting with "." (dotfiles)</span>
-                    </label>
+                    <div class="setting-group">
+                        <h4>Filters</h4>
+                        <label class="setting-item">
+                            <input type="checkbox" id="exclude-dots-checkbox" checked>
+                            <span>Exclude files/folders starting with "." (dotfiles)</span>
+                        </label>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
-    <!-- Stats Modal -->
-    <div id="stats-modal" class="modal hidden">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Statistics</h3>
-                <button id="close-stats-btn" class="icon-btn">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
-                </button>
-            </div>
-            <div class="modal-body">
-                <div id="stats-content"></div>
+
+        <!-- Stats Modal -->
+        <div id="stats-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Statistics</h3>
+                    <button id="close-stats-btn" class="icon-btn">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div id="stats-content"></div>
+                </div>
             </div>
         </div>
-    </div>
 
-    <!-- Status Toast -->
-    <div id="status-toast" class="status-toast hidden">
-        <div class="spinner"></div>
-        <span id="status-text">Processing...</span>
-    </div>
+        <!-- Status Toast -->
+        <div id="status-toast" class="status-toast hidden">
+            <div class="spinner"></div>
+            <span id="status-text">Processing...</span>
+        </div>
 
-    <script src="script.js"></script>
+        <script src="script.js"></script>
 </body>
 
 </html>
