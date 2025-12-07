@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const downloadZipBtn = document.getElementById('download-zip-btn');
     const modeDisplayBtn = document.getElementById('mode-display-btn');
 
+    // Filter
+    const filterInput = document.getElementById('filter-input');
+
     // Buttons
     const settingsBtn = document.getElementById('settings-btn');
     const statsBtn = document.getElementById('stats-btn');
@@ -69,6 +72,144 @@ document.addEventListener('DOMContentLoaded', () => {
         hideStatus(4000);
     }
 
+    // --- Glob Logic ---
+    function globToRegex(glob) {
+        // Simple implementation of glob patterns
+        // Support: * (wildcard), ? (single char), relative paths
+        // Special case: **/ for recursive (simplified)
+
+        // Escape regex special chars except * and ?
+        let regexStr = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+
+        // Replace wildcards
+        regexStr = regexStr.replace(/\*/g, '.*');
+        regexStr = regexStr.replace(/\?/g, '.');
+
+        // Support directory boundaries if needed? 
+        // For now, simpler match is usually better for users.
+        return new RegExp('^' + regexStr + '$', 'i'); // Case insensitive
+    }
+
+    // Debounce for filter
+    let debounceTimer;
+    if (filterInput) {
+        filterInput.addEventListener('input', (e) => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                applyFilter(e.target.value);
+            }, 300);
+        });
+    }
+
+    function applyFilter(query) {
+        const rawPatterns = query.split(/[\s,]+/).filter(p => p.trim() !== '');
+
+        const includePatterns = [];
+        const excludePatterns = [];
+
+        rawPatterns.forEach(p => {
+            if (p.startsWith('!')) {
+                excludePatterns.push(globToRegex(p.substring(1)));
+            } else {
+                includePatterns.push(globToRegex(p));
+            }
+        });
+
+        // If no includes, assume match all (unless excluded)
+        const matchAll = includePatterns.length === 0;
+
+        const allItems = fileList.querySelectorAll('.item'); // All items including folders?
+        // Wait, filter applies to FILES usually.
+        // If a file matches, its parents should be visible.
+
+        // Strategy: 
+        // 1. Reset: Remove .filtered-out from everything.
+        // 2. Hide everything (add .filtered-out).
+        // 3. Scan files. If match -> show file AND show all parents.
+
+        // But folders need to be considered. 
+        // Ideally, we traverse the DOM structure.
+
+        const allLis = fileList.querySelectorAll('li');
+
+        if (rawPatterns.length === 0) {
+            allLis.forEach(li => li.classList.remove('filtered-out'));
+            return;
+        }
+
+        // Hide all LIs initially
+        allLis.forEach(li => li.classList.add('filtered-out'));
+
+        // Find all file items (leaves)
+        const fileItems = fileList.querySelectorAll('.item.file-item');
+
+        fileItems.forEach(item => {
+            const entry = item.entry;
+            const fullPath = getFullPath(item); // We need a way to get full path for trees
+
+            // Check Excludes
+            let exclude = false;
+            for (const regex of excludePatterns) {
+                if (regex.test(fullPath) || regex.test(item.downloadName)) {
+                    exclude = true;
+                    break;
+                }
+            }
+            if (exclude) return; // Keep hidden
+
+            // Check Includes
+            let include = matchAll;
+            if (!matchAll) {
+                for (const regex of includePatterns) {
+                    if (regex.test(fullPath) || regex.test(item.downloadName)) {
+                        include = true;
+                        break;
+                    }
+                }
+            }
+
+            if (include) {
+                // Show this item's LI using parentElement
+                // Structure: li > div.item
+                const li = item.parentElement;
+                li.classList.remove('filtered-out');
+
+                // Show parents (Walk up DOM)
+                let parent = li.parentElement; // ul.nested or file-list
+                while (parent && parent !== fileList) {
+                    if (parent.tagName === 'UL' && parent.classList.contains('nested')) {
+                        // Expand the UL
+                        parent.classList.add('expanded');
+                        // Show the parent LI of this UL
+                        const parentLi = parent.parentElement;
+                        parentLi.classList.remove('filtered-out');
+
+                        // Ensure the folder item is marked as open
+                        const folderItem = parentLi.querySelector('.item.folder-toggle');
+                        if (folderItem) folderItem.classList.add('open');
+                    }
+                    parent = parent.parentElement;
+                }
+            }
+        });
+    }
+
+    function getFullPath(itemDiv) {
+        if (appSettings.viewMode === 'list') {
+            const nameSpan = itemDiv.querySelector('.file-name');
+            return nameSpan.textContent;
+        } else {
+            // Traverse up for tree view? 
+            // Or just use name? 
+            // Users often filter by extension: *.js
+            // If they want path search: src/*.js
+            // We need path.
+            // Let's rely on constructing path from DOM or entry?
+            // Entry has `fullPath` property in FileSystem API!
+            return itemDiv.entry.fullPath.substring(1); // Remove leading /
+        }
+    }
+
     // --- Event Listeners ---
 
     dropZone.addEventListener('dragover', (e) => {
@@ -99,6 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 await new Promise(r => setTimeout(r, 50));
 
                 await handleEntries(entries);
+
                 hideStatus(500);
             } catch (err) {
                 console.error("Drop Handler Error:", err);
@@ -111,6 +253,7 @@ document.addEventListener('DOMContentLoaded', () => {
         currentRootEntries = [];
         renderFileList();
         fileListContainer.classList.add('hidden');
+        if (filterInput) filterInput.value = '';
     });
 
     applyBtn.addEventListener('click', async () => {
@@ -152,6 +295,12 @@ document.addEventListener('DOMContentLoaded', () => {
             showStatus("Switching view...");
             await new Promise(r => setTimeout(r, 10));
             await renderFileList();
+
+            // Re-apply filter if exists
+            if (filterInput && filterInput.value) {
+                applyFilter(filterInput.value);
+            }
+
             hideStatus(0);
         } catch (e) {
             console.error(e);
@@ -238,13 +387,24 @@ document.addEventListener('DOMContentLoaded', () => {
         fileList.innerHTML = '';
         if (currentRootEntries.length > 0) {
             fileListContainer.classList.remove('hidden');
+            dropZone.classList.add('hidden'); // Hide Drop Zone
 
             if (appSettings.viewMode === 'tree') {
+                const shouldAutoExpand = currentRootEntries.length === 1 && currentRootEntries[0].isDirectory;
+
                 for (const entry of currentRootEntries) {
                     // Tree Element creation is recursive and awaited.
                     if (shouldInclude(entry)) {
                         const element = await createTreeElement(entry);
-                        if (element) fileList.appendChild(element);
+                        if (element) {
+                            if (shouldAutoExpand) {
+                                const itemDiv = element.querySelector('.item.folder-toggle');
+                                const nestedUl = element.querySelector('.nested');
+                                if (itemDiv) itemDiv.classList.add('open');
+                                if (nestedUl) nestedUl.classList.add('expanded');
+                            }
+                            fileList.appendChild(element);
+                        }
                     }
                 }
             } else {
@@ -253,6 +413,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } else {
             fileListContainer.classList.add('hidden');
+            dropZone.classList.remove('hidden'); // Show Drop Zone
         }
     }
 
@@ -308,37 +469,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const ul = document.createElement('ul');
             ul.classList.add('nested');
 
-            // NOTE: We recursively read ALL entries to build the tree.
-            // On a huge folder, this takes forever. 
-            // BUT, users usually expect the tree to load.
-            // To fix "Scanning..." stuck, we might need to defer loading children?
-            // "Lazy Loading": Only load children when expanded.
-
-            // CURRENT IMPLEMENTATION: Recurses immediately.
-            // If the user drops a folder with 20,000 files, this Loop runs 20k times.
-            // It IS awaited, so it blocks the 'Scanning...' line from finishing.
-
-            // FIX: Lazy Load for Tree View.
-            // Only create the UL, don't populate it yet.
-            // Populate on click.
-
-            // However, that changes the logic significantly.
-            // Let's stick to full scan but wrap in robust try/catch.
-            // Actually, if it's taking 10s+, user thinks it's stuck.
-            // I should update status inside the recursion? Hard to pass status down.
-
-            // For now, let's stick to robust Error Handling in the Drop Handler.
-            // And maybe assume the user sees the spinner spinning?
-
-            // Wait, createTreeElement is recursive.
-            // `await readEntries()` calls itself.
-
             const reader = entry.createReader();
             const readEntries = async () => {
                 return new Promise((resolve) => {
                     reader.readEntries(async (entries) => {
                         if (entries.length > 0) {
-                            // Sort
                             entries.sort((a, b) => {
                                 if (a.isDirectory === b.isDirectory) {
                                     return a.name.localeCompare(b.name);
@@ -355,7 +490,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                     }
                                 }
                             }
-                            // Continue reading (standard FileSystem API pagination)
                             await readEntries();
                         }
                         resolve();
@@ -375,9 +509,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const allFiles = [];
 
         async function traverse(entry, path) {
-            // Update status occasionally?
-            // Since we are single-threaded mostly here (awaiting IO), UI might freeze.
-            // We should yield.
             if (entry.isDirectory) {
                 if (!shouldInclude(entry)) return;
                 const reader = entry.createReader();
@@ -408,7 +539,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         allFiles.sort((a, b) => a.path.localeCompare(b.path));
 
-        // Use DocumentFragment for faster append
         const fragment = document.createDocumentFragment();
 
         for (const fileData of allFiles) {
@@ -452,7 +582,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const action = appSettings.actionMode;
         const targetExtension = '.' + action;
 
-        const fileItems = Array.from(fileList.querySelectorAll('.item.file-item'));
+        // Only select items that are NOT filtered out
+        // The .filtered-out class is on the LI, which is the parent of the .item div
+        const allFileItems = Array.from(fileList.querySelectorAll('.item.file-item'));
+        const fileItems = allFileItems.filter(item => !item.parentElement.classList.contains('filtered-out'));
+
         const total = fileItems.length;
 
         const binaryExtensions = new Set([
@@ -615,6 +749,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         html += `</tbody></table></div>`;
+        html += `</tbody></table></div>`;
         statsContent.innerHTML = html;
     }
 
@@ -623,7 +758,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const zip = new JSZip();
 
         if (appSettings.viewMode === 'list') {
-            const items = Array.from(fileList.children);
+            const items = Array.from(fileList.children).filter(li => !li.classList.contains('filtered-out'));
             for (const li of items) {
                 const itemDiv = li.querySelector('.item');
                 const entry = itemDiv.entry; // File entry
@@ -639,7 +774,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             }
         } else {
-            const rootItems = Array.from(fileList.children);
+            const rootItems = Array.from(fileList.children).filter(li => !li.classList.contains('filtered-out'));
             for (const li of rootItems) {
                 await addToZip(li, zip);
             }
@@ -662,6 +797,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function addToZip(li, zipFolder) {
+        if (li.classList.contains('filtered-out')) return;
+
         const itemDiv = li.querySelector('.item');
         if (!itemDiv) return;
 

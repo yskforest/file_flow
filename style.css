@@ -71,6 +71,10 @@ header p {
     transform: scale(1.02);
 }
 
+.drop-zone.hidden {
+    display: none;
+}
+
 .drop-content {
     text-align: center;
     color: var(--text-secondary);
@@ -189,6 +193,29 @@ header p {
 .icon-btn:hover {
     background-color: var(--border-color);
     color: var(--text-primary);
+}
+
+.search-input {
+    background-color: var(--bg-color);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 0.4rem 0.8rem;
+    border-radius: 0.5rem;
+    font-family: 'Consolas', 'Monaco', monospace;
+    /* Monospace for code-like feel */
+    font-size: 0.85rem;
+    outline: none;
+    width: 200px;
+    transition: all 0.2s;
+}
+
+.search-input:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.filtered-out {
+    display: none !important;
 }
 
 .file-tree {
