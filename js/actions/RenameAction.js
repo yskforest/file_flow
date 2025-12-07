@@ -4,7 +4,7 @@
 
     class RenameAction extends BaseAction {
         constructor(extension) {
-            super(extension.replace('.', ''), `Add ${extension}`);
+            super(extension, `Add ${extension}`);
             this.extension = extension;
 
             // Text extensions we shouldn't append to
@@ -44,25 +44,31 @@
             const targetExtension = this.extension;
 
             // Simple check again
-            if (lowercaseName.endsWith(targetExtension.toLowerCase())) return;
+            if (lowercaseName.endsWith(targetExtension.toLowerCase())) {
+                return;
+            }
 
             const newName = originalName + targetExtension;
 
-            const nameSpan = itemDiv.querySelector('.file-name');
-            if (nameSpan) {
-                // Determine view mode from global state to decide how to update text
-                // But generally replace text content or append
-                if (FileFlow.state.appSettings.viewMode === 'list') {
-                    // In flat list, we might want to just append to the full path?
-                    // original script logic: nameSpan.textContent = nameSpan.textContent + targetExtension;
-                    // Use regex to replace end of string?
-                    nameSpan.textContent = nameSpan.textContent + targetExtension;
-                } else {
-                    nameSpan.textContent = newName;
-                }
+            // Store verification on global state for lazy rendering
+            // We use fullPath as key. ensuring persistence.
+            if (!FileFlow.state.entryMetadata[entry.fullPath]) {
+                FileFlow.state.entryMetadata[entry.fullPath] = {};
             }
-            itemDiv.classList.add('renamed');
-            itemDiv.downloadName = newName;
+            FileFlow.state.entryMetadata[entry.fullPath].newFilename = newName;
+
+            if (itemDiv) {
+                const nameSpan = itemDiv.querySelector('.file-name');
+                if (nameSpan) {
+                    if (FileFlow.state.appSettings.viewMode === 'list') {
+                        nameSpan.textContent = nameSpan.textContent + targetExtension;
+                    } else {
+                        nameSpan.textContent = newName;
+                    }
+                }
+                itemDiv.classList.add('renamed');
+                itemDiv.downloadName = newName;
+            }
         }
     }
 

@@ -120,26 +120,34 @@
                 }
             }
 
-            // Update UI
-            const nameSpan = itemDiv.querySelector('.file-name');
+            // Store on global state for lazy rendering
+            if (!FileFlow.state.entryMetadata[entry.fullPath]) {
+                FileFlow.state.entryMetadata[entry.fullPath] = {};
+            }
+            FileFlow.state.entryMetadata[entry.fullPath].detectionInfo = { encoding, eol };
 
-            // Remove existing badges if any
-            const existingBadges = itemDiv.querySelectorAll('.info-badge');
-            existingBadges.forEach(b => b.remove());
+            // Update UI if visible
+            if (itemDiv) {
+                const nameSpan = itemDiv.querySelector('.file-name');
 
-            if (nameSpan) {
-                const badgeEnc = document.createElement('span');
-                badgeEnc.className = 'info-badge enc';
-                badgeEnc.textContent = encoding;
-                badgeEnc.style.cssText = "background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px; font-family: monospace;";
+                // Remove existing badges if any
+                const existingBadges = itemDiv.querySelectorAll('.info-badge');
+                existingBadges.forEach(b => b.remove());
 
-                const badgeEol = document.createElement('span');
-                badgeEol.className = 'info-badge eol';
-                badgeEol.textContent = eol;
-                badgeEol.style.cssText = "background: rgba(168, 85, 247, 0.2); color: #c084fc; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 4px; font-family: monospace;";
+                if (nameSpan) {
+                    const badgeEnc = document.createElement('span');
+                    badgeEnc.className = 'info-badge enc';
+                    badgeEnc.textContent = encoding;
+                    badgeEnc.style.cssText = "background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px; font-family: monospace;";
 
-                nameSpan.after(badgeEol);
-                nameSpan.after(badgeEnc); // Insert Enc before EOL
+                    const badgeEol = document.createElement('span');
+                    badgeEol.className = 'info-badge eol';
+                    badgeEol.textContent = eol;
+                    badgeEol.style.cssText = "background: rgba(168, 85, 247, 0.2); color: #c084fc; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 4px; font-family: monospace;";
+
+                    nameSpan.after(badgeEol);
+                    nameSpan.after(badgeEnc); // Insert Enc before EOL
+                }
             }
         }
     }

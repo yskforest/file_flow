@@ -91,6 +91,11 @@
         // Settings Modal
         settingsBtn.addEventListener('click', () => settingsModal.classList.remove('hidden'));
         closeSettingsBtn.addEventListener('click', () => settingsModal.classList.add('hidden'));
+        settingsModal.addEventListener('click', (e) => {
+            if (e.target === settingsModal) {
+                settingsModal.classList.add('hidden');
+            }
+        });
 
         // Settings Changes
         const modeRadios = document.querySelectorAll('input[name="action-mode"]');
@@ -130,57 +135,82 @@
             dropZone.classList.remove('hidden');
         });
 
-        // Apply Action
+        // Apply Action (Deep Recursive)
         applyBtn.addEventListener('click', async () => {
             const mode = State.appSettings.actionMode;
-            const action = ActionManager.getAction(mode);
+            const action = ActionManager.getAction(mode === 'detect' ? 'detect' : '.' + mode);
 
-            // Handle 'md' / 'txt' which map to 'RenameAction' with extension arg
-            // But our registry uses ID like '.md'.
-
-            let targetAction = null;
-            if (mode === 'detect') {
-                targetAction = ActionManager.getAction('detect');
-            } else {
-                targetAction = ActionManager.getAction('.' + mode);
-            }
-
-            if (!targetAction) {
+            if (!action) {
                 console.error("No action found for mode:", mode);
                 return;
             }
 
-            Status.show("Applying action...");
-            // Iterate visible items
-            const list = document.getElementById('file-list');
-            // We need to iterate DOM to find items.
-            // Best to select all '.item' that are not inside a hidden container?
-            // Or just iterate all '.item' and check if filtered out?
+            Status.show("Applying action..."); // Initial
+            await new Promise(r => setTimeout(r, 10));
 
-            const items = Array.from(list.querySelectorAll('.item'));
-            const total = items.length;
-            let processed = 0;
+            // Setup Filter Matcher (Same as Stats)
+            const query = State.searchQuery;
+            let matchFn = null;
+            if (query && query.trim() !== '') {
+                const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
+                const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p));
+                const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p.slice(1)));
 
-            // Heuristic: batch process to avoid freezing UI
-            const chunks = [];
-            const chunkSize = 50;
-            for (let i = 0; i < total; i += chunkSize) {
-                chunks.push(items.slice(i, i + chunkSize));
+                matchFn = (name) => {
+                    for (const regex of excludePatterns) if (regex.test(name)) return false;
+                    if (includePatterns.length === 0) return true;
+                    for (const regex of includePatterns) if (regex.test(name)) return true;
+                    return false;
+                };
             }
 
-            for (const chunk of chunks) {
-                await new Promise(r => setTimeout(r, 0)); // yield
-                for (const itemDiv of chunk) {
-                    // check filter
-                    // The li is parent of itemDiv? No itemDiv is child of li.
-                    const li = itemDiv.closest('li');
-                    if (li && li.classList.contains('filtered-out')) continue;
+            // Build Map of visible items for live updates
+            const visibleItemMap = new Map();
+            document.querySelectorAll('.item').forEach(div => {
+                if (div.entry) visibleItemMap.set(div.entry.fullPath, div);
+            });
 
-                    const entry = itemDiv.entry; // Stored on DOM
-                    if (entry && targetAction.shouldApply(entry, itemDiv.querySelector('.file-name').textContent)) {
-                        await targetAction.execute(itemDiv, entry);
+            // Recursive Runner
+            async function runTraverse(entry) {
+                // Dotfile check
+                if (State.appSettings.excludeDots && entry.name.startsWith('.')) return;
+
+                if (entry.isDirectory) {
+                    const reader = entry.createReader();
+                    const readAll = async () => {
+                        let entries = [];
+                        let done = false;
+                        while (!done) {
+                            try {
+                                const results = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+                                if (results.length === 0) done = true;
+                                else entries = entries.concat(results);
+                            } catch (e) { done = true; }
+                        }
+                        return entries;
+                    }
+                    const children = await readAll();
+                    for (const child of children) await runTraverse(child);
+                } else {
+                    // File
+                    const isMatch = matchFn ? matchFn(entry.name) : true;
+                    if (isMatch) {
+                        // Apply Action
+                        if (action.shouldApply(entry, entry.name)) {
+                            // Check if visible using fullPath as key
+                            const itemDiv = visibleItemMap.get(entry.fullPath);
+
+                            // Pass itemDiv (can be undefined) to execute
+                            // Action will update Global Metadata and UI if itemDiv exists
+                            await action.execute(itemDiv, entry);
+                        }
                     }
                 }
+            }
+
+            // Run
+            for (const root of State.currentRootEntries) {
+                await runTraverse(root);
             }
 
             Status.hide();
@@ -199,10 +229,10 @@
             }
         });
 
-        // Stats (Simple Layout)
-        statsBtn.addEventListener('click', () => {
+        // Stats (Deep Scan)
+        statsBtn.addEventListener('click', async () => {
             // Calculate stats
-            const stats = calculateStats();
+            const stats = await calculateStats();
             renderStats(stats);
             statsModal.classList.remove('hidden');
         });
@@ -226,49 +256,112 @@
         }
     }
 
-    function calculateStats() {
+    async function calculateStats() {
+        // Show status because this might take time
+        Status.show("Calculating statistics...");
+        // Yield to render
+        await new Promise(r => setTimeout(r, 10));
+
         let totalFiles = 0;
         let totalFolders = 0;
         const extCounts = {};
 
-        // We need to traverse everything for accurate stats
-        // Cannot rely on DOM if tree is collapsed.
-        // We need a helper to iterate all entries from State.currentRootEntries
-        // But FileSystem traversal is async and we don't want to re-read everything if possible?
-        // Actually, render logic already read them?
-        // In Tree mode, expanding reads files. If not expanded, we don't know children.
-        // So accurate stats require full traversal.
+        const query = State.searchQuery;
+        let matchFn = null;
 
-        // For now, let's just count WHAT IS LOADED/RENDERED in the DOM for simplicity, 
-        // OR warn user that stats might be partial if tree not fully expanded.
-        // Re-traversing is safer but slower. 
-        // Let's rely on Render's traverseFiles Logic?
+        if (query && query.trim() !== '') {
+            const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
+            const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p));
+            const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p.slice(1)));
 
-        // Actually, `Render.renderFlatList` does full traversal.
-        // Let's assume we can reuse that traversal logic or accept that stats are simple for now.
-        // Given user request for stats... let's do a quick deep scan if possible. 
-        // But scanning 1000s files takes time.
+            matchFn = (name) => {
+                for (const regex of excludePatterns) {
+                    if (regex.test(name)) return false;
+                }
+                if (includePatterns.length === 0) return true;
+                for (const regex of includePatterns) {
+                    if (regex.test(name)) return true;
+                }
+                return false;
+            };
+        }
 
-        // Simpler approach: Iterate current DOM items. If user hasn't expanded tree, we only know top level.
-        // This is a trade-off. 
-        // BUT, `renderFlatList` is available. Let's lazily call the traversal that `renderFlatList` uses?
-        // That function is inside Render closure.
+        async function traverse(entry) {
+            // Global exclude dots check
+            if (State.appSettings.excludeDots && entry.name.startsWith('.')) return;
 
-        // Let's implement a simple DOM-based stat for now (Visible items) or
-        // Just say "Items Loaded".
+            if (entry.isDirectory) {
+                totalFolders++;
+                // If filtering, do we count folders? 
+                // Usually stats count matching files. 
+                // But let's count matching folders too? 
+                // If filter is "*.js", folders don't match. 
+                // But we must traverse them to find files.
+                // Logic: Traversal is independent of match, counting is dependent?
+                // Or: matchFn applies to current entry.
 
-        const allItems = document.querySelectorAll('.item');
-        allItems.forEach(div => {
-            const entry = div.entry;
-            if (entry.isDirectory) totalFolders++;
-            else {
-                totalFiles++;
-                const name = entry.name;
-                const ext = name.includes('.') ? '.' + name.split('.').pop().toLowerCase() : 'no-ext';
-                extCounts[ext] = (extCounts[ext] || 0) + 1;
+                // Note: The UI filter logic hides non-matching items.
+                // If I search "*.js", folders are hidden unless they contain *.js.
+                // The User asked: "Filter filtered things only".
+                // If I search "*.js", I expect to see count of JS files. Folder count? Maybe 0 if folders don't match *.js?
+                // Let's check name against matchFn.
+                const isMatch = matchFn ? matchFn(entry.name) : true;
+
+                // We ALWAYS traverse into folders to find files (unless folder itself is excluded by dotfiles)
+                // But do we COUNT the folder?
+                // If matchFn exists, only count if matches.
+                // If matchFn is null (no filter), count.
+                // Wait, if filter is *.js, folder "src" doesn't match.
+                // So totalFolders should handle that.
+
+                // However, we MUST traverse it.
+
+                const reader = entry.createReader();
+                const readAll = async () => {
+                    let entries = [];
+                    let done = false;
+                    while (!done) {
+                        try {
+                            const results = await new Promise((resolve, reject) => {
+                                reader.readEntries(resolve, reject);
+                            });
+                            if (results.length === 0) done = true;
+                            else entries = entries.concat(results);
+                        } catch (e) {
+                            console.warn("Read error:", e);
+                            done = true;
+                        }
+                    }
+                    return entries;
+                };
+
+                const children = await readAll();
+                for (const child of children) {
+                    await traverse(child);
+                }
+
+                // Adjust folder count based on filter
+                if (matchFn && !isMatch) {
+                    totalFolders--;
+                }
+
+            } else {
+                // File
+                const isMatch = matchFn ? matchFn(entry.name) : true;
+                if (isMatch) {
+                    totalFiles++;
+                    const name = entry.name;
+                    const ext = name.includes('.') ? '.' + name.split('.').pop().toLowerCase() : 'no-ext';
+                    extCounts[ext] = (extCounts[ext] || 0) + 1;
+                }
             }
-        });
+        }
 
+        for (const root of State.currentRootEntries) {
+            await traverse(root);
+        }
+
+        Status.hide();
         return { totalFiles, totalFolders, extCounts };
     }
 

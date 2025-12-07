@@ -1,3 +1,35 @@
+// Status UI
+(function () {
+    const statusToast = document.getElementById('status-toast');
+    const statusText = document.getElementById('status-text');
+
+    function showStatus(message) {
+        if (statusText) statusText.textContent = message;
+        if (statusToast) statusToast.classList.remove('hidden');
+    }
+
+    function hideStatus(delay = 0) {
+        if (delay > 0) {
+            setTimeout(() => {
+                if (statusToast) statusToast.classList.add('hidden');
+            }, delay);
+        } else {
+            if (statusToast) statusToast.classList.add('hidden');
+        }
+    }
+
+    function showError(message) {
+        showStatus("Error: " + message);
+        setTimeout(() => hideStatus(), 3000);
+    }
+
+    FileFlow.ui.Status = {
+        show: showStatus,
+        hide: hideStatus,
+        error: showError
+    };
+})();
+
 // Render Logic
 (function () {
 
@@ -35,12 +67,41 @@
         }
 
         // Name
+        // Name
         const nameSpan = document.createElement('span');
         nameSpan.className = 'file-name';
-        nameSpan.textContent = entry.name;
+
+        // Check for persisted metadata
+        const metadata = FileFlow.state.entryMetadata[entry.fullPath] || {};
+
+        // Check for persisted rename
+        const displayName = metadata.newFilename || entry.name;
+        nameSpan.textContent = displayName;
         itemDiv.appendChild(nameSpan);
 
-        // Arrow for folders
+        // Check for persisted detection info
+        if (metadata.detectionInfo) {
+            const { encoding, eol } = metadata.detectionInfo;
+
+            const badgeEnc = document.createElement('span');
+            badgeEnc.className = 'info-badge enc';
+            badgeEnc.textContent = encoding;
+            badgeEnc.style.cssText = "background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px; font-family: monospace;";
+
+            const badgeEol = document.createElement('span');
+            badgeEol.className = 'info-badge eol';
+            badgeEol.textContent = eol;
+            badgeEol.style.cssText = "background: rgba(168, 85, 247, 0.2); color: #c084fc; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 4px; font-family: monospace;";
+
+            itemDiv.appendChild(badgeEnc);
+            itemDiv.appendChild(badgeEol);
+        }
+
+        if (metadata.newFilename) {
+            itemDiv.classList.add('renamed');
+            itemDiv.downloadName = metadata.newFilename;
+        }
+
         // Arrow for folders
         if (entry.isDirectory) {
             const arrow = document.createElement('span');
