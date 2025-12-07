@@ -40,8 +40,30 @@
     const fileListContainer = document.getElementById('file-list-container');
     const dropZone = document.getElementById('drop-zone');
 
-    // Create Tree Element (Lazy)
-    async function createTreeElement(entry) {
+    // Helper to Create Matcher
+    function createMatcher(query) {
+        if (!query || query.trim() === '') return null;
+        const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
+        const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => Glob.globToRegex(p));
+        const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => Glob.globToRegex(p.slice(1)));
+
+        return (name) => {
+            for (const regex of excludePatterns) if (regex.test(name)) return false;
+            if (includePatterns.length === 0) return true;
+            for (const regex of includePatterns) if (regex.test(name)) return true;
+            return false;
+        };
+    }
+
+    // Create Tree Element (Lazy or Filtered)
+    async function createTreeElement(entry, matcher) {
+        const hasFilter = !!matcher;
+
+        // Filter Logic Early Reject for Files
+        if (hasFilter && !entry.isDirectory) {
+            if (!matcher(entry.name)) return null;
+        }
+
         const li = document.createElement('li');
 
         const itemDiv = document.createElement('div');
@@ -66,7 +88,6 @@
             itemDiv.classList.add('file-item');
         }
 
-        // Name
         // Name
         const nameSpan = document.createElement('span');
         nameSpan.className = 'file-name';
@@ -113,16 +134,38 @@
                 e.stopPropagation();
                 toggleFolder(itemDiv);
             });
-        } // Close folder setup
+        }
 
-        // Append Item Row (Always)
+        // Append Item Row
         li.appendChild(itemDiv);
 
-        // If directory, Append Children Container (after item row)
+        // Container for children
         if (entry.isDirectory) {
             const ul = document.createElement('ul');
             ul.className = 'nested';
             li.appendChild(ul);
+
+            // AUTO-LOAD if Filter is Active
+            if (hasFilter) {
+                // Force load children
+                await loadChildren(li, entry, matcher);
+
+                // Check if any children matches
+                const hasVisibleChildren = ul.children.length > 0;
+                const isSelfMatch = matcher(entry.name);
+
+                if (!hasVisibleChildren && !isSelfMatch) {
+                    return null; // Hide this folder
+                }
+
+                if (hasVisibleChildren) {
+                    ul.classList.add('expanded');
+                    itemDiv.classList.add('open');
+                    itemDiv.setAttribute('data-loaded', 'true');
+                    const arrow = itemDiv.querySelector('.arrow');
+                    if (arrow) arrow.textContent = '▶';
+                }
+            }
         }
 
         return li;
@@ -137,13 +180,20 @@
 
         if (!isExpanded) {
             // Expand
-            // Check if loaded
             if (!itemDiv.hasAttribute('data-loaded')) {
-                // Load children
+                // Load children (Lazy)
                 const arrow = itemDiv.querySelector('.arrow');
-                if (arrow) arrow.textContent = '...'; // Loading indicator
+                if (arrow) arrow.textContent = '...';
 
-                await loadChildren(li, itemDiv.entry);
+                // If toggling manually, no filter is assumed usually, or we use current filter?
+                // If filter was applied, it should be loaded. 
+                // If user cleared filter, then manually toggles.
+                // Let's pass null matcher for manual toggle unless we want to enforce filter?
+                // Usually if filter is cleared, we show everything.
+                // If filter is active, manual toggle might be needed?
+                // Let's check state query.
+                const matcher = createMatcher(FileFlow.state.searchQuery);
+                await loadChildren(li, itemDiv.entry, matcher);
 
                 itemDiv.setAttribute('data-loaded', 'true');
                 if (arrow) arrow.textContent = '▶';
@@ -157,7 +207,7 @@
         }
     }
 
-    async function loadChildren(li, entry) {
+    async function loadChildren(li, entry, matcher) {
         const ul = li.querySelector('.nested');
         if (!ul) return;
 
@@ -190,15 +240,15 @@
         const fragment = document.createDocumentFragment();
         for (const child of children) {
             if (shouldInclude(child)) {
-                // Recursive call (createTreeElement is now lazy/synchronous-ish structure creation)
-                const childElement = await createTreeElement(child);
+                // Recurse with matcher
+                const childElement = await createTreeElement(child, matcher);
                 if (childElement) fragment.appendChild(childElement);
             }
         }
         ul.appendChild(fragment);
     }
 
-    async function renderFlatList() {
+    async function renderFlatList(matcher) {
         // Collect all files recursively
         const files = [];
         for (const root of FileFlow.state.currentRootEntries) {
@@ -207,10 +257,11 @@
 
         files.sort((a, b) => a.path.localeCompare(b.path));
 
-        // Use Fragment for perfo
         const fragment = document.createDocumentFragment();
 
         for (const item of files) {
+            if (matcher && !matcher(item.path)) continue; // Filter Path
+
             const li = document.createElement('li');
             const itemDiv = document.createElement('div');
             itemDiv.className = 'item file-item';
@@ -269,6 +320,9 @@
 
         list.innerHTML = '';
 
+        // Prepare Matcher
+        const matcher = createMatcher(FileFlow.state.searchQuery);
+
         if (FileFlow.state.currentRootEntries.length > 0) {
             if (fileListContainer) fileListContainer.classList.remove('hidden');
             if (dropZone) dropZone.classList.add('hidden');
@@ -278,14 +332,14 @@
 
                 for (const entry of FileFlow.state.currentRootEntries) {
                     if (shouldInclude(entry)) {
-                        const element = await createTreeElement(entry);
+                        const element = await createTreeElement(entry, matcher);
                         if (element) {
-                            list.appendChild(element); // Append first
+                            list.appendChild(element);
 
-                            if (shouldAutoExpand) {
+                            // Manual auto-expand if no filter and single root
+                            if (!matcher && shouldAutoExpand) {
                                 const itemDiv = element.querySelector('.item.folder-toggle');
                                 if (itemDiv) {
-                                    // Trigger toggle to load contents
                                     await toggleFolder(itemDiv);
                                 }
                             }
@@ -293,11 +347,8 @@
                     }
                 }
             } else {
-                await renderFlatList();
+                await renderFlatList(matcher);
             }
-
-            // Re-apply filter if exists
-            applyFilter();
 
         } else {
             if (fileListContainer) fileListContainer.classList.add('hidden');
@@ -306,111 +357,8 @@
     }
 
     function applyFilter() {
-        const query = FileFlow.state.searchQuery;
-        const input = document.getElementById('filter-input');
-
-        // If query is empty, show all
-        if (!query || query.trim() === '') {
-            const allLi = document.querySelectorAll('#file-list li');
-            allLi.forEach(li => {
-                li.classList.remove('filtered-out');
-                // Don't modify expanded state on clear? Or collpase all?
-                // Let's leave state as is.
-            });
-            return;
-        }
-
-        const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
-        const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => Glob.globToRegex(p));
-        const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => Glob.globToRegex(p.slice(1)));
-
-        // Helper to check match
-        const matches = (name) => {
-            // Exclude check
-            for (const regex of excludePatterns) {
-                if (regex.test(name)) return false;
-            }
-            // Include check
-            if (includePatterns.length === 0) return true; // If no include patterns, everything matches (unless excluded)
-
-            for (const regex of includePatterns) {
-                if (regex.test(name)) return true;
-            }
-            return false;
-        };
-
-        const list = document.getElementById('file-list');
-        if (!list) return;
-
-        // Recursive visibility check for Tree Mode
-        // For flat list, it's simple iteration.
-
-        if (FileFlow.state.appSettings.viewMode === 'list') {
-            const lis = Array.from(list.children);
-            lis.forEach(li => {
-                const nameSpan = li.querySelector('.file-name');
-                const name = nameSpan ? nameSpan.textContent : '';
-                if (matches(name)) {
-                    li.classList.remove('filtered-out');
-                } else {
-                    li.classList.add('filtered-out');
-                }
-            });
-        } else {
-            // Tree Mode is tricky. 
-            // We need to traverse DOM tree.
-            // If a child matches, all parents must be visible and expanded.
-
-            // First hide everything? No, let's iterate.
-
-            // We will do a bottom-up check or recursive check on DOM?
-            // Let's do recursive check on the DOM roots.
-            const roots = Array.from(list.children); // top level styling li
-
-            roots.forEach(rootLi => checkVisibility(rootLi));
-        }
-
-        function checkVisibility(li) {
-            const itemDiv = li.querySelector('.item');
-            const name = itemDiv.querySelector('.file-name').textContent;
-            const nestedUl = li.querySelector('.nested');
-
-            let isSelfMatch = matches(name);
-            let hasVisibleChild = false;
-
-            if (nestedUl) {
-                const childLis = Array.from(nestedUl.children);
-                childLis.forEach(child => {
-                    if (checkVisibility(child)) {
-                        hasVisibleChild = true;
-                    }
-                });
-            }
-
-            // Folder logic: Visible if self matches OR has visible child.
-            // File logic: Visible if self matches.
-
-            // NOTE: In tree view, usually we match files. If we match a folder name "src", do we show all children?
-            // Implementation detail: If folder matches, we act as if it's a match.
-
-            let isVisible = isSelfMatch || hasVisibleChild;
-
-            if (isVisible) {
-                li.classList.remove('filtered-out');
-                // Auto expand if it's a folder containing visible children (and we are filtering)
-                // If it's just self, maybe not expand?
-                // Let's expand if hasVisibleChild to show the matches.
-                if (hasVisibleChild && nestedUl) {
-                    nestedUl.classList.add('expanded');
-                    itemDiv.classList.add('open');
-                }
-            } else {
-                li.classList.add('filtered-out');
-            }
-
-            return isVisible;
-        }
-
+        // Just trigger render, logic is inside render now
+        renderFileList();
     }
 
     FileFlow.ui.Render = {

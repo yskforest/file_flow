@@ -130,6 +130,7 @@
         // Clear List
         clearBtn.addEventListener('click', () => {
             State.currentRootEntries = [];
+            State.entryMetadata = {}; // Clear per-file persistent state
             document.getElementById('file-list').innerHTML = '';
             document.getElementById('file-list-container').classList.add('hidden');
             dropZone.classList.remove('hidden');
