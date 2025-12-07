@@ -39,6 +39,8 @@ body {
     flex-direction: column;
     gap: 1rem;
     height: 100%;
+    justify-content: flex-start;
+    /* Explicit top match */
 }
 
 header {
@@ -67,8 +69,8 @@ main {
     flex-direction: column;
     overflow: hidden;
     /* Contain inner scroll */
-    min-height: 0;
     /* Flexbox scrolling fix */
+    justify-content: flex-start;
 }
 
 .drop-zone {
@@ -118,6 +120,7 @@ main {
     overflow: hidden;
     /* Important for inner scroll */
     min-height: 0;
+    justify-content: flex-start;
 }
 
 .file-list-container.hidden {
