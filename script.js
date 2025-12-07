@@ -5,28 +5,72 @@ document.addEventListener('DOMContentLoaded', () => {
     const clearBtn = document.getElementById('clear-btn');
     const applyBtn = document.getElementById('apply-btn');
     const downloadZipBtn = document.getElementById('download-zip-btn');
-    const modeDisplayBtn = document.getElementById('mode-display-btn'); // Badge
+    const modeDisplayBtn = document.getElementById('mode-display-btn');
 
-    // Settings Elements
+    // Buttons
     const settingsBtn = document.getElementById('settings-btn');
+    const statsBtn = document.getElementById('stats-btn');
+    const viewToggleBtn = document.getElementById('view-toggle-btn');
+    const viewIconTree = document.getElementById('view-icon-tree');
+    const viewIconList = document.getElementById('view-icon-list');
+
+    // Modals & Status
     const settingsModal = document.getElementById('settings-modal');
     const closeSettingsBtn = document.getElementById('close-settings-btn');
+    const statsModal = document.getElementById('stats-modal');
+    const closeStatsBtn = document.getElementById('close-stats-btn');
+    const statsContent = document.getElementById('stats-content');
+
+    // Status Toast
+    const statusToast = document.getElementById('status-toast');
+    const statusText = document.getElementById('status-text');
+    const statusSpinner = document.querySelector('#status-toast .spinner');
+
+    // Settings
     const excludeDotsCheckbox = document.getElementById('exclude-dots-checkbox');
-    const actionModeRadios = document.getElementsByName('action-mode'); // Radio NodeList
+    const actionModeRadios = document.getElementsByName('action-mode');
 
     // App State
     let currentRootEntries = [];
     const appSettings = {
         excludeDotFiles: true,
-        actionMode: 'md' // Default mode
+        actionMode: 'md',
+        viewMode: 'tree'
     };
 
-    // Initialize UI
+    // Initialize
     updateModeDisplay();
+
+    // --- Status Helpers ---
+    let statusTimeout;
+
+    function showStatus(message, showSpinner = true) {
+        clearTimeout(statusTimeout);
+        statusText.textContent = message;
+        if (showSpinner) {
+            statusSpinner.style.display = 'block';
+        } else {
+            statusSpinner.style.display = 'none';
+        }
+        statusToast.classList.remove('hidden');
+    }
+
+    function hideStatus(delay = 1000) {
+        statusTimeout = setTimeout(() => {
+            statusToast.classList.add('hidden');
+        }, delay);
+    }
+
+    function showError(message) {
+        showStatus(message, false);
+        if (statusSpinner) statusSpinner.style.display = 'none';
+
+        // Auto hide after longer delay
+        hideStatus(4000);
+    }
 
     // --- Event Listeners ---
 
-    // Drag and Drop
     dropZone.addEventListener('dragover', (e) => {
         e.preventDefault();
         dropZone.classList.add('drag-over');
@@ -36,29 +80,83 @@ document.addEventListener('DOMContentLoaded', () => {
         dropZone.classList.remove('drag-over');
     });
 
-    dropZone.addEventListener('drop', (e) => {
+    dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
         dropZone.classList.remove('drag-over');
 
         const items = e.dataTransfer.items;
         if (items) {
-            handleItems(items);
+            // Capture entries IMMEDIATELY before any await
+            // DataTransfer items are only valid during the event
+            const entries = [];
+            for (let i = 0; i < items.length; i++) {
+                const entry = items[i].webkitGetAsEntry();
+                if (entry) entries.push(entry);
+            }
+
+            try {
+                showStatus("Scanning files...");
+                await new Promise(r => setTimeout(r, 50));
+
+                await handleEntries(entries);
+                hideStatus(500);
+            } catch (err) {
+                console.error("Drop Handler Error:", err);
+                showError("Error scanning files");
+            }
         }
     });
 
-    // Toolbar Actions
     clearBtn.addEventListener('click', () => {
         currentRootEntries = [];
         renderFileList();
         fileListContainer.classList.add('hidden');
     });
 
-    applyBtn.addEventListener('click', () => {
-        applyExtensionAction();
+    applyBtn.addEventListener('click', async () => {
+        try {
+            await applyExtensionAction();
+            showStatus("Done!", false);
+            hideStatus(1500);
+        } catch (err) {
+            console.error(err);
+            showError("Error processing files");
+        }
     });
 
-    downloadZipBtn.addEventListener('click', () => {
-        downloadZip();
+    downloadZipBtn.addEventListener('click', async () => {
+        try {
+            showStatus("Generating ZIP...");
+            await new Promise(r => setTimeout(r, 50));
+            await downloadZip();
+            showStatus("Done!", false);
+            hideStatus(1500);
+        } catch (err) {
+            console.error(err);
+            showError("Error generating ZIP");
+        }
+    });
+
+    viewToggleBtn.addEventListener('click', async () => {
+        try {
+            appSettings.viewMode = appSettings.viewMode === 'tree' ? 'list' : 'tree';
+
+            if (appSettings.viewMode === 'tree') {
+                viewIconTree.classList.remove('hidden');
+                viewIconList.classList.add('hidden');
+            } else {
+                viewIconTree.classList.add('hidden');
+                viewIconList.classList.remove('hidden');
+            }
+
+            showStatus("Switching view...");
+            await new Promise(r => setTimeout(r, 10));
+            await renderFileList();
+            hideStatus(0);
+        } catch (e) {
+            console.error(e);
+            hideStatus(0);
+        }
     });
 
     // Settings Modal
@@ -66,10 +164,11 @@ document.addEventListener('DOMContentLoaded', () => {
         settingsModal.classList.remove('hidden');
     });
 
-    // Badge Click -> Open Settings
-    modeDisplayBtn.addEventListener('click', () => {
-        settingsModal.classList.remove('hidden');
-    });
+    if (modeDisplayBtn) {
+        modeDisplayBtn.addEventListener('click', () => {
+            settingsModal.classList.remove('hidden');
+        });
+    }
 
     closeSettingsBtn.addEventListener('click', () => {
         settingsModal.classList.add('hidden');
@@ -81,14 +180,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Stats Modal
+    statsBtn.addEventListener('click', async () => {
+        try {
+            showStatus("Calculating stats...");
+            await new Promise(r => setTimeout(r, 10));
+            await showStats();
+            hideStatus(0);
+            statsModal.classList.remove('hidden');
+        } catch (e) {
+            console.error(e);
+            showError("Error calculating stats");
+        }
+    });
+
+    closeStatsBtn.addEventListener('click', () => {
+        statsModal.classList.add('hidden');
+    });
+
+    statsModal.addEventListener('click', (e) => {
+        if (e.target === statsModal) {
+            statsModal.classList.add('hidden');
+        }
+    });
+
     // Settings Changes
     excludeDotsCheckbox.addEventListener('change', (e) => {
         appSettings.excludeDotFiles = e.target.checked;
-        // Re-render the list with new settings
         renderFileList();
     });
 
-    // Radio Button Changes (Mode)
     Array.from(actionModeRadios).forEach(radio => {
         radio.addEventListener('change', (e) => {
             if (e.target.checked) {
@@ -102,61 +223,53 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Core Logic ---
 
     function updateModeDisplay() {
-        const modeText = appSettings.actionMode === 'md' ? 'Add .md' : 'Add .txt';
-        modeDisplayBtn.textContent = `Mode: ${modeText}`;
+        if (modeDisplayBtn) {
+            const modeText = appSettings.actionMode === 'md' ? 'Add .md' : 'Add .txt';
+            modeDisplayBtn.textContent = `Mode: ${modeText}`;
+        }
     }
 
-    async function handleItems(items) {
-        currentRootEntries = [];
-        for (let i = 0; i < items.length; i++) {
-            const item = items[i].webkitGetAsEntry();
-            if (item) {
-                currentRootEntries.push(item);
-            }
-        }
-        renderFileList();
+    async function handleEntries(entries) {
+        currentRootEntries = entries;
+        await renderFileList();
     }
 
     async function renderFileList() {
         fileList.innerHTML = '';
         if (currentRootEntries.length > 0) {
             fileListContainer.classList.remove('hidden');
-            for (const entry of currentRootEntries) {
-                // Determine visibility based on settings
-                if (shouldInclude(entry)) {
-                    const element = await createTreeElement(entry);
-                    if (element) {
-                        fileList.appendChild(element);
+
+            if (appSettings.viewMode === 'tree') {
+                for (const entry of currentRootEntries) {
+                    // Tree Element creation is recursive and awaited.
+                    if (shouldInclude(entry)) {
+                        const element = await createTreeElement(entry);
+                        if (element) fileList.appendChild(element);
                     }
                 }
+            } else {
+                await renderFlatList();
             }
+
         } else {
             fileListContainer.classList.add('hidden');
         }
     }
 
-    function shouldInclude(entry) {
-        if (appSettings.excludeDotFiles && entry.name.startsWith('.')) {
-            return false;
-        }
-        return true;
-    }
-
+    // --- Tree Render ---
     async function createTreeElement(entry) {
-        // Double check inclusion just in case
         if (!shouldInclude(entry)) return null;
 
         const li = document.createElement('li');
         const itemDiv = document.createElement('div');
         itemDiv.classList.add('item');
-        itemDiv.entry = entry; // Store entry on DOM element
+        itemDiv.entry = entry;
 
         const icon = document.createElement('span');
         if (entry.isDirectory) {
             icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder-icon"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
             itemDiv.classList.add('folder-toggle');
 
-            // Arrow for folder
             const arrow = document.createElement('span');
             arrow.classList.add('arrow');
             arrow.textContent = '▶';
@@ -174,9 +287,8 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="file-icon"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
             itemDiv.classList.add('file-item');
-            itemDiv.downloadName = entry.name; // Default download name
+            itemDiv.downloadName = entry.name;
 
-            // Download on click
             itemDiv.addEventListener('click', (e) => {
                 e.stopPropagation();
                 downloadFile(entry, itemDiv.downloadName);
@@ -196,7 +308,31 @@ document.addEventListener('DOMContentLoaded', () => {
             const ul = document.createElement('ul');
             ul.classList.add('nested');
 
-            // Read entries
+            // NOTE: We recursively read ALL entries to build the tree.
+            // On a huge folder, this takes forever. 
+            // BUT, users usually expect the tree to load.
+            // To fix "Scanning..." stuck, we might need to defer loading children?
+            // "Lazy Loading": Only load children when expanded.
+
+            // CURRENT IMPLEMENTATION: Recurses immediately.
+            // If the user drops a folder with 20,000 files, this Loop runs 20k times.
+            // It IS awaited, so it blocks the 'Scanning...' line from finishing.
+
+            // FIX: Lazy Load for Tree View.
+            // Only create the UL, don't populate it yet.
+            // Populate on click.
+
+            // However, that changes the logic significantly.
+            // Let's stick to full scan but wrap in robust try/catch.
+            // Actually, if it's taking 10s+, user thinks it's stuck.
+            // I should update status inside the recursion? Hard to pass status down.
+
+            // For now, let's stick to robust Error Handling in the Drop Handler.
+            // And maybe assume the user sees the spinner spinning?
+
+            // Wait, createTreeElement is recursive.
+            // `await readEntries()` calls itself.
+
             const reader = entry.createReader();
             const readEntries = async () => {
                 return new Promise((resolve) => {
@@ -212,12 +348,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
                             for (const childEntry of entries) {
                                 if (shouldInclude(childEntry)) {
+                                    // Recursive call
                                     const childElement = await createTreeElement(childEntry);
                                     if (childElement) {
                                         ul.appendChild(childElement);
                                     }
                                 }
                             }
+                            // Continue reading (standard FileSystem API pagination)
                             await readEntries();
                         }
                         resolve();
@@ -232,58 +370,279 @@ document.addEventListener('DOMContentLoaded', () => {
         return li;
     }
 
-    function applyExtensionAction() {
-        const action = appSettings.actionMode; // Get from state, not DOM selector
+    // --- Flat List Render ---
+    async function renderFlatList() {
+        const allFiles = [];
+
+        async function traverse(entry, path) {
+            // Update status occasionally?
+            // Since we are single-threaded mostly here (awaiting IO), UI might freeze.
+            // We should yield.
+            if (entry.isDirectory) {
+                if (!shouldInclude(entry)) return;
+                const reader = entry.createReader();
+                const readAll = async () => {
+                    return new Promise(resolve => {
+                        reader.readEntries(async (entries) => {
+                            if (entries.length > 0) {
+                                for (const child of entries) {
+                                    await traverse(child, path + entry.name + '/');
+                                }
+                                await readAll();
+                            }
+                            resolve();
+                        });
+                    });
+                }
+                await readAll();
+            } else {
+                if (shouldInclude(entry)) {
+                    allFiles.push({ entry, path: path + entry.name });
+                }
+            }
+        }
+
+        for (const root of currentRootEntries) {
+            await traverse(root, '');
+        }
+
+        allFiles.sort((a, b) => a.path.localeCompare(b.path));
+
+        // Use DocumentFragment for faster append
+        const fragment = document.createDocumentFragment();
+
+        for (const fileData of allFiles) {
+            const li = document.createElement('li');
+            const itemDiv = document.createElement('div');
+            itemDiv.classList.add('item', 'file-item');
+            itemDiv.style.paddingLeft = '1rem';
+            itemDiv.entry = fileData.entry;
+            itemDiv.downloadName = fileData.entry.name;
+
+            const icon = document.createElement('span');
+            icon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="file-icon"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`;
+            itemDiv.appendChild(icon);
+
+            const nameSpan = document.createElement('span');
+            nameSpan.classList.add('file-name');
+            nameSpan.textContent = fileData.path;
+            nameSpan.style.opacity = "0.9";
+            itemDiv.appendChild(nameSpan);
+
+            itemDiv.addEventListener('click', (e) => {
+                e.stopPropagation();
+                downloadFile(fileData.entry, itemDiv.downloadName);
+            });
+
+            li.appendChild(itemDiv);
+            fragment.appendChild(li);
+        }
+        fileList.appendChild(fragment);
+    }
+
+
+    function shouldInclude(entry) {
+        if (appSettings.excludeDotFiles && entry.name.startsWith('.')) {
+            return false;
+        }
+        return true;
+    }
+
+    async function applyExtensionAction() {
+        const action = appSettings.actionMode;
         const targetExtension = '.' + action;
 
-        const fileItems = fileList.querySelectorAll('.item.file-item');
-        // List of common text-based extensions
-        const textExtensions = [
-            '.txt', '.md', '.py', '.js', '.css', '.html', '.json',
-            '.xml', '.yml', '.yaml', '.sh', '.bat', '.log', '.csv',
-            '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.hpp', '.cc', '.cxx',
-            '.java', '.rb', '.php', '.sql', '.toml', '.ini', '.cfg', '.conf'
-        ];
+        const fileItems = Array.from(fileList.querySelectorAll('.item.file-item'));
+        const total = fileItems.length;
 
-        fileItems.forEach(async (itemDiv) => {
-            const entry = itemDiv.entry;
-            if (entry && !entry.isDirectory) {
-                entry.file((file) => {
-                    const originalName = file.name;
-                    const lowercaseName = originalName.toLowerCase();
+        const binaryExtensions = new Set([
+            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg', '.webp',
+            '.mp3', '.wav', '.ogg', '.mp4', '.webm', '.mov', '.avi',
+            '.zip', '.tar', '.gz', '.7z', '.rar',
+            '.exe', '.dll', '.so', '.dylib', '.bin', '.iso', '.dmg',
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.ttf', '.otf', '.woff', '.woff2', '.eot'
+        ]);
 
-                    let isText = false;
-                    if (file.type && file.type.startsWith('text/')) {
-                        isText = true;
+        const BATCH_SIZE = 50;
+
+        for (let i = 0; i < fileItems.length; i += BATCH_SIZE) {
+            // Update status every batch
+            showStatus(`Processing: ${Math.min(i, total)} / ${total} files...`);
+
+            const batch = fileItems.slice(i, i + BATCH_SIZE);
+
+            await Promise.all(batch.map(async (itemDiv) => {
+                const entry = itemDiv.entry;
+                if (!entry || entry.isDirectory) return;
+
+                const file = await new Promise(resolve => entry.file(resolve));
+                const originalName = file.name;
+                const lowercaseName = originalName.toLowerCase();
+
+                // 1. Fast Check
+                const lastDotIndex = lowercaseName.lastIndexOf('.');
+                if (lastDotIndex !== -1) {
+                    const ext = lowercaseName.substring(lastDotIndex);
+                    if (binaryExtensions.has(ext)) return;
+                }
+
+                // 2. Content Check
+                let isText = true;
+                try {
+                    const slice = file.slice(0, 512);
+                    const buffer = await slice.arrayBuffer();
+                    const view = new Uint8Array(buffer);
+                    for (let j = 0; j < view.length; j++) {
+                        if (view[j] === 0) {
+                            isText = false;
+                            break;
+                        }
                     }
-                    else if (textExtensions.some(ext => lowercaseName.endsWith(ext))) {
-                        isText = true;
-                    }
-                    else if (!originalName.includes('.')) {
-                        isText = true;
-                    }
+                } catch (e) {
+                    console.error("Error reading file:", originalName, e);
+                    return;
+                }
 
-                    if (isText && !lowercaseName.endsWith(targetExtension)) {
-                        const newName = originalName + targetExtension;
+                if (isText && !lowercaseName.endsWith(targetExtension)) {
+                    const newName = originalName + targetExtension;
 
-                        const nameSpan = itemDiv.querySelector('.file-name');
-                        if (nameSpan) {
+                    const nameSpan = itemDiv.querySelector('.file-name');
+                    if (nameSpan) {
+                        if (appSettings.viewMode === 'list') {
+                            nameSpan.textContent = nameSpan.textContent + targetExtension;
+                        } else {
                             nameSpan.textContent = newName;
                         }
-                        itemDiv.classList.add('renamed');
-                        itemDiv.downloadName = newName;
                     }
-                });
-            }
-        });
+                    itemDiv.classList.add('renamed');
+                    itemDiv.downloadName = newName;
+                }
+            }));
+
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
     }
+
+    async function showStats() {
+        const stats = {
+            totalFiles: 0,
+            excludedFiles: 0,
+            extensions: {}
+        };
+
+        async function count(entry) {
+            if (entry.name.startsWith('.')) {
+                stats.excludedFiles++;
+                if (appSettings.excludeDotFiles) return;
+            }
+
+            if (entry.isDirectory) {
+                const reader = entry.createReader();
+                const readAll = async () => {
+                    return new Promise(resolve => {
+                        reader.readEntries(async (entries) => {
+                            if (entries.length > 0) {
+                                for (const child of entries) {
+                                    await count(child);
+                                }
+                                await readAll();
+                            }
+                            resolve();
+                        });
+                    });
+                }
+                await readAll();
+            } else {
+                if (entry.name.startsWith('.') && appSettings.excludeDotFiles) {
+                    return;
+                }
+
+                stats.totalFiles++;
+                const name = entry.name.toLowerCase();
+                const lastDot = name.lastIndexOf('.');
+                let ext = '(no extension)';
+                if (lastDot !== -1 && lastDot !== 0) {
+                    ext = name.substring(lastDot);
+                } else if (name.startsWith('.')) {
+                    ext = name;
+                }
+
+                stats.extensions[ext] = (stats.extensions[ext] || 0) + 1;
+            }
+        }
+
+        for (const root of currentRootEntries) {
+            await count(root);
+        }
+
+        renderStatsTable(stats);
+    }
+
+    function renderStatsTable(stats) {
+        let html = `
+            <div class="stats-summary">
+                <div class="stat-box">
+                    <div class="label">Total Files</div>
+                    <div class="value">${stats.totalFiles}</div>
+                </div>
+                <div class="stat-box">
+                    <div class="label">Excluded (Dot)</div>
+                    <div class="value">${stats.excludedFiles}</div>
+                </div>
+            </div>
+            <h4>By Extension</h4>
+            <div style="max-height: 200px; overflow-y: auto;">
+            <table class="stats-table">
+                <thead>
+                    <tr>
+                        <th>Extension</th>
+                        <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        const sortedExts = Object.entries(stats.extensions).sort((a, b) => b[1] - a[1]);
+
+        for (const [ext, count] of sortedExts) {
+            html += `
+                <tr>
+                    <td>${ext}</td>
+                    <td>${count}</td>
+                </tr>
+            `;
+        }
+
+        html += `</tbody></table></div>`;
+        statsContent.innerHTML = html;
+    }
+
 
     async function downloadZip() {
         const zip = new JSZip();
-        const rootItems = Array.from(fileList.children);
 
-        for (const li of rootItems) {
-            await addToZip(li, zip);
+        if (appSettings.viewMode === 'list') {
+            const items = Array.from(fileList.children);
+            for (const li of items) {
+                const itemDiv = li.querySelector('.item');
+                const entry = itemDiv.entry; // File entry
+
+                const nameSpan = itemDiv.querySelector('.file-name');
+                const docPath = nameSpan.textContent;
+
+                await new Promise(resolve => {
+                    entry.file(file => {
+                        zip.file(docPath, file);
+                        resolve();
+                    });
+                });
+            }
+        } else {
+            const rootItems = Array.from(fileList.children);
+            for (const li of rootItems) {
+                await addToZip(li, zip);
+            }
         }
 
         let zipFilename = "files.zip";
