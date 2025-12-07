@@ -35,25 +35,11 @@
 
     // Dependencies
     const Glob = FileFlow.utils.Glob;
+    const FileSystem = FileFlow.utils.FileSystem;
 
     const fileList = document.getElementById('file-list');
     const fileListContainer = document.getElementById('file-list-container');
     const dropZone = document.getElementById('drop-zone');
-
-    // Helper to Create Matcher
-    function createMatcher(query) {
-        if (!query || query.trim() === '') return null;
-        const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
-        const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => Glob.globToRegex(p));
-        const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => Glob.globToRegex(p.slice(1)));
-
-        return (name) => {
-            for (const regex of excludePatterns) if (regex.test(name)) return false;
-            if (includePatterns.length === 0) return true;
-            for (const regex of includePatterns) if (regex.test(name)) return true;
-            return false;
-        };
-    }
 
     // Create Tree Element (Lazy or Filtered)
     async function createTreeElement(entry, matcher) {
@@ -180,19 +166,14 @@
 
         if (!isExpanded) {
             // Expand
+            // Check if loaded
             if (!itemDiv.hasAttribute('data-loaded')) {
                 // Load children (Lazy)
                 const arrow = itemDiv.querySelector('.arrow');
                 if (arrow) arrow.textContent = '...';
 
-                // If toggling manually, no filter is assumed usually, or we use current filter?
-                // If filter was applied, it should be loaded. 
-                // If user cleared filter, then manually toggles.
-                // Let's pass null matcher for manual toggle unless we want to enforce filter?
-                // Usually if filter is cleared, we show everything.
-                // If filter is active, manual toggle might be needed?
-                // Let's check state query.
-                const matcher = createMatcher(FileFlow.state.searchQuery);
+                // Use shared matcher
+                const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
                 await loadChildren(li, itemDiv.entry, matcher);
 
                 itemDiv.setAttribute('data-loaded', 'true');
@@ -211,25 +192,9 @@
         const ul = li.querySelector('.nested');
         if (!ul) return;
 
-        const reader = entry.createReader();
-        const readEntries = async () => {
-            let allEntries = [];
-            let finished = false;
+        // Use Shared Reader
+        const children = await FileSystem.readDir(entry);
 
-            while (!finished) {
-                const batch = await new Promise((resolve, reject) => {
-                    reader.readEntries(resolve, reject);
-                });
-                if (batch.length === 0) {
-                    finished = true;
-                } else {
-                    allEntries = allEntries.concat(batch);
-                }
-            }
-            return allEntries;
-        };
-
-        const children = await readEntries();
         // Sort
         children.sort((a, b) => {
             if (a.isDirectory && !b.isDirectory) return -1;
@@ -251,8 +216,23 @@
     async function renderFlatList(matcher) {
         // Collect all files recursively
         const files = [];
+
+        // Simple customized traversal for flat list path-tracking
+        async function traverseWithPaths(entry, path) {
+            if (FileFlow.state.appSettings.excludeDots && entry.name.startsWith('.')) return;
+
+            if (entry.isFile) {
+                files.push({ entry, path: path + entry.name });
+            } else if (entry.isDirectory) {
+                const children = await FileSystem.readDir(entry);
+                for (const child of children) {
+                    await traverseWithPaths(child, path + entry.name + '/');
+                }
+            }
+        }
+
         for (const root of FileFlow.state.currentRootEntries) {
-            await traverseFiles(root, '', files);
+            await traverseWithPaths(root, '');
         }
 
         files.sort((a, b) => a.path.localeCompare(b.path));
@@ -282,31 +262,6 @@
         if (list) list.appendChild(fragment);
     }
 
-    async function traverseFiles(entry, path, list) {
-        if (!shouldInclude(entry)) return;
-
-        if (entry.isFile) {
-            list.push({ entry: entry, path: path + entry.name });
-        } else if (entry.isDirectory) {
-            const reader = entry.createReader();
-            const readAll = async () => {
-                let entries = [];
-                let done = false;
-                while (!done) {
-                    const results = await new Promise(resolve => reader.readEntries(resolve));
-                    if (results.length === 0) done = true;
-                    else entries = entries.concat(results);
-                }
-                return entries;
-            }
-
-            const children = await readAll();
-            for (const child of children) {
-                await traverseFiles(child, path + entry.name + '/', list);
-            }
-        }
-    }
-
     function shouldInclude(entry) {
         if (FileFlow.state.appSettings.excludeDots && entry.name.startsWith('.')) {
             return false;
@@ -321,7 +276,7 @@
         list.innerHTML = '';
 
         // Prepare Matcher
-        const matcher = createMatcher(FileFlow.state.searchQuery);
+        const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
 
         if (FileFlow.state.currentRootEntries.length > 0) {
             if (fileListContainer) fileListContainer.classList.remove('hidden');

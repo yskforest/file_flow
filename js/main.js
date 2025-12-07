@@ -146,24 +146,10 @@
                 return;
             }
 
-            Status.show("Applying action..."); // Initial
+            Status.show("Applying action...");
             await new Promise(r => setTimeout(r, 10));
 
-            // Setup Filter Matcher (Same as Stats)
-            const query = State.searchQuery;
-            let matchFn = null;
-            if (query && query.trim() !== '') {
-                const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
-                const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p));
-                const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p.slice(1)));
-
-                matchFn = (name) => {
-                    for (const regex of excludePatterns) if (regex.test(name)) return false;
-                    if (includePatterns.length === 0) return true;
-                    for (const regex of includePatterns) if (regex.test(name)) return true;
-                    return false;
-                };
-            }
+            const matcher = FileFlow.utils.Glob.createMatcher(State.searchQuery);
 
             // Build Map of visible items for live updates
             const visibleItemMap = new Map();
@@ -171,48 +157,24 @@
                 if (div.entry) visibleItemMap.set(div.entry.fullPath, div);
             });
 
-            // Recursive Runner
-            async function runTraverse(entry) {
-                // Dotfile check
-                if (State.appSettings.excludeDots && entry.name.startsWith('.')) return;
+            // Use Shared Traversal
+            await FileFlow.utils.FileSystem.traverse(
+                State.currentRootEntries,
+                async (entry) => {
+                    // Match Check
+                    const isMatch = matcher ? matcher(entry.name) : true;
 
-                if (entry.isDirectory) {
-                    const reader = entry.createReader();
-                    const readAll = async () => {
-                        let entries = [];
-                        let done = false;
-                        while (!done) {
-                            try {
-                                const results = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
-                                if (results.length === 0) done = true;
-                                else entries = entries.concat(results);
-                            } catch (e) { done = true; }
-                        }
-                        return entries;
-                    }
-                    const children = await readAll();
-                    for (const child of children) await runTraverse(child);
-                } else {
-                    // File
-                    const isMatch = matchFn ? matchFn(entry.name) : true;
-                    if (isMatch) {
-                        // Apply Action
+                    if (entry.isFile && isMatch) {
                         if (action.shouldApply(entry, entry.name)) {
-                            // Check if visible using fullPath as key
                             const itemDiv = visibleItemMap.get(entry.fullPath);
-
-                            // Pass itemDiv (can be undefined) to execute
-                            // Action will update Global Metadata and UI if itemDiv exists
                             await action.execute(itemDiv, entry);
                         }
                     }
-                }
-            }
-
-            // Run
-            for (const root of State.currentRootEntries) {
-                await runTraverse(root);
-            }
+                    // Continue recursing
+                    return true;
+                },
+                { excludeDots: State.appSettings.excludeDots }
+            );
 
             Status.hide();
         });
@@ -232,7 +194,6 @@
 
         // Stats (Deep Scan)
         statsBtn.addEventListener('click', async () => {
-            // Calculate stats
             const stats = await calculateStats();
             renderStats(stats);
             statsModal.classList.remove('hidden');
@@ -258,109 +219,36 @@
     }
 
     async function calculateStats() {
-        // Show status because this might take time
         Status.show("Calculating statistics...");
-        // Yield to render
         await new Promise(r => setTimeout(r, 10));
 
         let totalFiles = 0;
         let totalFolders = 0;
         const extCounts = {};
+        const matcher = FileFlow.utils.Glob.createMatcher(State.searchQuery);
 
-        const query = State.searchQuery;
-        let matchFn = null;
+        await FileFlow.utils.FileSystem.traverse(
+            State.currentRootEntries,
+            async (entry) => {
+                const isMatch = matcher ? matcher(entry.name) : true;
 
-        if (query && query.trim() !== '') {
-            const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
-            const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p));
-            const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => FileFlow.utils.Glob.globToRegex(p.slice(1)));
-
-            matchFn = (name) => {
-                for (const regex of excludePatterns) {
-                    if (regex.test(name)) return false;
-                }
-                if (includePatterns.length === 0) return true;
-                for (const regex of includePatterns) {
-                    if (regex.test(name)) return true;
-                }
-                return false;
-            };
-        }
-
-        async function traverse(entry) {
-            // Global exclude dots check
-            if (State.appSettings.excludeDots && entry.name.startsWith('.')) return;
-
-            if (entry.isDirectory) {
-                totalFolders++;
-                // If filtering, do we count folders? 
-                // Usually stats count matching files. 
-                // But let's count matching folders too? 
-                // If filter is "*.js", folders don't match. 
-                // But we must traverse them to find files.
-                // Logic: Traversal is independent of match, counting is dependent?
-                // Or: matchFn applies to current entry.
-
-                // Note: The UI filter logic hides non-matching items.
-                // If I search "*.js", folders are hidden unless they contain *.js.
-                // The User asked: "Filter filtered things only".
-                // If I search "*.js", I expect to see count of JS files. Folder count? Maybe 0 if folders don't match *.js?
-                // Let's check name against matchFn.
-                const isMatch = matchFn ? matchFn(entry.name) : true;
-
-                // We ALWAYS traverse into folders to find files (unless folder itself is excluded by dotfiles)
-                // But do we COUNT the folder?
-                // If matchFn exists, only count if matches.
-                // If matchFn is null (no filter), count.
-                // Wait, if filter is *.js, folder "src" doesn't match.
-                // So totalFolders should handle that.
-
-                // However, we MUST traverse it.
-
-                const reader = entry.createReader();
-                const readAll = async () => {
-                    let entries = [];
-                    let done = false;
-                    while (!done) {
-                        try {
-                            const results = await new Promise((resolve, reject) => {
-                                reader.readEntries(resolve, reject);
-                            });
-                            if (results.length === 0) done = true;
-                            else entries = entries.concat(results);
-                        } catch (e) {
-                            console.warn("Read error:", e);
-                            done = true;
-                        }
+                if (entry.isDirectory) {
+                    // If filter is active, only count matching folders (or logic can be adjusted)
+                    if (!matcher || isMatch) {
+                        totalFolders++;
                     }
-                    return entries;
-                };
-
-                const children = await readAll();
-                for (const child of children) {
-                    await traverse(child);
+                } else {
+                    if (!matcher || isMatch) {
+                        totalFiles++;
+                        const name = entry.name;
+                        const ext = name.includes('.') ? '.' + name.split('.').pop().toLowerCase() : 'no-ext';
+                        extCounts[ext] = (extCounts[ext] || 0) + 1;
+                    }
                 }
-
-                // Adjust folder count based on filter
-                if (matchFn && !isMatch) {
-                    totalFolders--;
-                }
-
-            } else {
-                // File
-                const isMatch = matchFn ? matchFn(entry.name) : true;
-                if (isMatch) {
-                    totalFiles++;
-                    const name = entry.name;
-                    const ext = name.includes('.') ? '.' + name.split('.').pop().toLowerCase() : 'no-ext';
-                    extCounts[ext] = (extCounts[ext] || 0) + 1;
-                }
-            }
-        }
-
-        for (const root of State.currentRootEntries) {
-            await traverse(root);
-        }
+                return true; // Recurse
+            },
+            { excludeDots: State.appSettings.excludeDots }
+        );
 
         Status.hide();
         return { totalFiles, totalFolders, extCounts };

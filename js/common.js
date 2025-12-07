@@ -18,21 +18,29 @@ window.FileFlow = {
 // Glob Matching Utility
 (function () {
     function globToRegex(glob) {
-        // Escape special regex characters except * and ?
         let regexString = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-
-        // Convert * to .*
         regexString = regexString.replace(/\*/g, '.*');
-
-        // Convert ? to .
         regexString = regexString.replace(/\?/g, '.');
+        return new RegExp('^' + regexString + '$', 'i');
+    }
 
-        // Anchor start and end
-        return new RegExp('^' + regexString + '$', 'i'); // Case insensitive
+    function createMatcher(query) {
+        if (!query || query.trim() === '') return null;
+        const patterns = query.split(/[\s,]+/).filter(s => s.length > 0);
+        const includePatterns = patterns.filter(p => !p.startsWith('!')).map(p => globToRegex(p));
+        const excludePatterns = patterns.filter(p => p.startsWith('!')).map(p => globToRegex(p.slice(1)));
+
+        return (name) => {
+            for (const regex of excludePatterns) if (regex.test(name)) return false;
+            if (includePatterns.length === 0) return true;
+            for (const regex of includePatterns) if (regex.test(name)) return true;
+            return false;
+        };
     }
 
     FileFlow.utils.Glob = {
-        globToRegex: globToRegex
+        globToRegex: globToRegex,
+        createMatcher: createMatcher
     };
 })();
 
@@ -55,9 +63,48 @@ window.FileFlow = {
         return slice.arrayBuffer();
     }
 
+    // Read Directory Entries (Async Iterator would be nice, but Promise array is fine)
+    async function readDir(entry) {
+        if (!entry.isDirectory) return [];
+        const reader = entry.createReader();
+        let entries = [];
+        let done = false;
+        while (!done) {
+            try {
+                const results = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+                if (results.length === 0) done = true;
+                else entries = entries.concat(results);
+            } catch (e) { done = true; }
+        }
+        return entries;
+    }
+
+    /*
+     * Generic Deep Traversal
+     * @param {Array|Object} roots - Root entry or array of entries
+     * @param {Function} visitFn - async (entry) => boolean|void. Return false to stop recursion into folder.
+     * @param {Object} options - { excludeDots: boolean }
+     */
+    async function traverse(roots, visitFn, options = {}) {
+        const entries = Array.isArray(roots) ? roots : [roots];
+
+        for (const entry of entries) {
+            if (options.excludeDots && entry.name.startsWith('.')) continue;
+
+            const shouldRecurse = await visitFn(entry);
+
+            if (entry.isDirectory && shouldRecurse !== false) {
+                const children = await readDir(entry);
+                await traverse(children, visitFn, options);
+            }
+        }
+    }
+
     FileFlow.utils.FileSystem = {
         readFileAsText: readFileAsText,
-        readFileSliceAsArrayBuffer: readFileSliceAsArrayBuffer
+        readFileSliceAsArrayBuffer: readFileSliceAsArrayBuffer,
+        readDir: readDir,
+        traverse: traverse
     };
 })();
 
