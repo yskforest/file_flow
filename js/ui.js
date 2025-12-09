@@ -1,265 +1,294 @@
-// Status UI
 (function () {
     const statusToast = document.getElementById('status-toast');
     const statusText = document.getElementById('status-text');
-
-    function showStatus(message) {
-        if (statusText) statusText.textContent = message;
-        if (statusToast) statusToast.classList.remove('hidden');
-    }
-
-    function hideStatus(delay = 0) {
-        if (delay > 0) {
-            setTimeout(() => {
-                if (statusToast) statusToast.classList.add('hidden');
-            }, delay);
-        } else {
-            if (statusToast) statusToast.classList.add('hidden');
-        }
-    }
-
-    function showError(message) {
-        showStatus("Error: " + message);
-        setTimeout(() => hideStatus(), 3000);
-    }
-
-    FileFlow.ui.Status = {
-        show: showStatus,
-        hide: hideStatus,
-        error: showError
-    };
-})();
-
-// Render Logic
-(function () {
-
-    // Dependencies
-    const Glob = FileFlow.utils.Glob;
-    const FileSystem = FileFlow.utils.FileSystem;
-
-    const fileList = document.getElementById('file-list');
-    const fileListContainer = document.getElementById('file-list-container');
     const dropZone = document.getElementById('drop-zone');
+    const fileListContainer = document.getElementById('file-list-container');
 
-    // Create Tree Element (Lazy or Filtered)
-    async function createTreeElement(entry, matcher) {
-        const hasFilter = !!matcher;
+    let gridInstance = null;
+    let originalGridData = []; // Store full dataset locally for filtering
 
-        // Filter Logic Early Reject for Files
-        if (hasFilter && !entry.isDirectory) {
-            if (!matcher(entry.name)) return null;
+    function showStatus(message, isLoading = false) {
+        if (!statusToast || !statusText) return;
+        statusText.textContent = message;
+        statusToast.classList.remove('hidden');
+        const spinner = statusToast.querySelector('.spinner');
+        if (spinner) {
+            spinner.style.display = isLoading ? 'block' : 'none';
         }
 
+        // Auto hide after 3s if not loading
+        if (!isLoading) {
+            setTimeout(() => {
+                statusToast.classList.add('hidden');
+            }, 3000);
+        }
+    }
+
+    function createTreeElement(entry, matcher = null) {
         const li = document.createElement('li');
+        // Filter logic for Tree View
+        if (matcher && !entry.isDirectory && !matcher(entry.name)) {
+            // If file and matches filter -> show. If not -> return null.
+        }
 
         const itemDiv = document.createElement('div');
         itemDiv.className = 'item';
-        itemDiv.entry = entry;
 
         // Icon
-        if (entry.isDirectory) {
-            itemDiv.innerHTML += `
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder-icon">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                </svg>
-            `;
-            itemDiv.classList.add('folder-toggle');
-        } else {
-            itemDiv.innerHTML += `
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="file-icon">
-                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                    <polyline points="13 2 13 9 20 9"></polyline>
-                </svg>
-            `;
-            itemDiv.classList.add('file-item');
-        }
+        const icon = document.createElement('i');
+        icon.className = entry.isDirectory ? 'fas fa-folder folder-icon' : 'far fa-file file-icon';
+        itemDiv.appendChild(icon);
 
         // Name
         const nameSpan = document.createElement('span');
         nameSpan.className = 'file-name';
-
-        // Check for persisted metadata
-        const metadata = FileFlow.state.entryMetadata[entry.fullPath] || {};
-
-        // Check for persisted rename
-        const displayName = metadata.newFilename || entry.name;
-        nameSpan.textContent = displayName;
+        nameSpan.textContent = entry.name;
         itemDiv.appendChild(nameSpan);
 
-        // Check for persisted detection info
-        if (metadata.detectionInfo) {
-            const { encoding, eol } = metadata.detectionInfo;
+        li.appendChild(itemDiv);
 
-            const badgeEnc = document.createElement('span');
-            badgeEnc.className = 'info-badge enc';
-            badgeEnc.textContent = encoding;
-            badgeEnc.style.cssText = "background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px; font-family: monospace;";
-
-            const badgeEol = document.createElement('span');
-            badgeEol.className = 'info-badge eol';
-            badgeEol.textContent = eol;
-            badgeEol.style.cssText = "background: rgba(168, 85, 247, 0.2); color: #c084fc; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 4px; font-family: monospace;";
-
-            itemDiv.appendChild(badgeEnc);
-            itemDiv.appendChild(badgeEol);
-        }
-
-        if (metadata.newFilename) {
-            itemDiv.classList.add('renamed');
-            itemDiv.downloadName = metadata.newFilename;
-        }
-
-        // Arrow for folders
         if (entry.isDirectory) {
+            itemDiv.classList.add('folder-toggle');
+            // Arrow
             const arrow = document.createElement('span');
             arrow.className = 'arrow';
-            arrow.textContent = '▶';
+            arrow.innerHTML = '&#9656;'; // Right triangle
             itemDiv.prepend(arrow);
+
+            const childrenContainer = document.createElement('ul');
+            childrenContainer.className = 'nested';
+            li.appendChild(childrenContainer);
 
             itemDiv.addEventListener('click', (e) => {
                 e.stopPropagation();
                 toggleFolder(itemDiv);
             });
-        }
 
-        // Append Item Row
-        li.appendChild(itemDiv);
-
-        // Container for children
-        if (entry.isDirectory) {
-            const ul = document.createElement('ul');
-            ul.className = 'nested';
-            li.appendChild(ul);
-
-            // AUTO-LOAD if Filter is Active
-            if (hasFilter) {
-                // Force load children
-                await loadChildren(li, entry, matcher);
-
-                // Check if any children matches
-                const hasVisibleChildren = ul.children.length > 0;
-                const isSelfMatch = matcher(entry.name);
-
-                if (!hasVisibleChildren && !isSelfMatch) {
-                    return null; // Hide this folder
-                }
-
-                if (hasVisibleChildren) {
-                    ul.classList.add('expanded');
-                    itemDiv.classList.add('open');
-                    itemDiv.setAttribute('data-loaded', 'true');
-                    const arrow = itemDiv.querySelector('.arrow');
-                    if (arrow) arrow.textContent = '▶';
-                }
-            }
+            // Mark as loaded/unloaded
+            li.dataset.loaded = 'false';
+            li.entry = entry; // Attach entry for lazy loading
+        } else {
+            itemDiv.classList.add('file-item');
+            itemDiv.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // Select file action
+                FileFlow.actions.execute(entry);
+            });
         }
 
         return li;
     }
 
     async function toggleFolder(itemDiv) {
-        const li = itemDiv.parentNode;
-        const nested = li.querySelector('.nested');
-        if (!nested) return;
+        const li = itemDiv.parentElement;
+        const arrow = itemDiv.querySelector('.arrow');
+        const childrenContainer = li.querySelector('.nested');
+        const entry = li.entry;
 
-        const isExpanded = nested.classList.contains('expanded');
-
-        if (!isExpanded) {
-            // Expand
-            // Check if loaded
-            if (!itemDiv.hasAttribute('data-loaded')) {
-                // Load children (Lazy)
-                const arrow = itemDiv.querySelector('.arrow');
-                if (arrow) arrow.textContent = '...';
-
-                // Use shared matcher
-                const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
-                await loadChildren(li, itemDiv.entry, matcher);
-
-                itemDiv.setAttribute('data-loaded', 'true');
-                if (arrow) arrow.textContent = '▶';
-            }
-            nested.classList.add('expanded');
-            itemDiv.classList.add('open');
-        } else {
+        if (childrenContainer.classList.contains('expanded')) {
             // Collapse
-            nested.classList.remove('expanded');
+            childrenContainer.classList.remove('expanded');
             itemDiv.classList.remove('open');
+            arrow.style.transform = 'rotate(0deg)';
+        } else {
+            // Expand
+            if (li.dataset.loaded === 'false') {
+                await loadChildren(entry, childrenContainer);
+                li.dataset.loaded = 'true';
+            }
+            childrenContainer.classList.add('expanded');
+            itemDiv.classList.add('open');
+            arrow.style.transform = 'rotate(90deg)';
         }
     }
 
-    async function loadChildren(li, entry, matcher) {
-        const ul = li.querySelector('.nested');
-        if (!ul) return;
+    async function loadChildren(directoryEntry, container) {
+        container.innerHTML = ''; // Clear placeholders
+        const entries = await FileFlow.utils.FileSystem.readDir(directoryEntry);
 
-        // Use Shared Reader
-        const children = await FileSystem.readDir(entry);
-
-        // Sort
-        children.sort((a, b) => {
-            if (a.isDirectory && !b.isDirectory) return -1;
-            if (!a.isDirectory && b.isDirectory) return 1;
-            return a.name.localeCompare(b.name);
+        // Sort: Folders first, then files
+        entries.sort((a, b) => {
+            if (a.isDirectory === b.isDirectory) {
+                return a.name.localeCompare(b.name);
+            }
+            return a.isDirectory ? -1 : 1;
         });
 
-        const fragment = document.createDocumentFragment();
-        for (const child of children) {
+        const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
+
+        for (const child of entries) {
             if (shouldInclude(child)) {
-                // Recurse with matcher
-                const childElement = await createTreeElement(child, matcher);
-                if (childElement) fragment.appendChild(childElement);
+                const el = await createTreeElement(child, matcher);
+                if (el) container.appendChild(el);
             }
         }
-        ul.appendChild(fragment);
+    }
+
+    // --- Flat List (Grid.js) Logic ---
+
+    function formatBytes(bytes, decimals = 2) {
+        if (!+bytes) return '0 Bytes';
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['Bytes', 'KiB', 'MiB', 'GiB', 'TiB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+    }
+
+    function formatDate(date) {
+        if (!date) return '-';
+        return new Date(date).toLocaleString();
+    }
+
+    // Custom Filter Logic for Grid.js
+    function filterGridDataType(typeFilter) {
+        if (!gridInstance) return;
+
+        let filtered = originalGridData;
+        if (typeFilter && typeFilter !== "") {
+            filtered = filtered.filter(row => row[3] === typeFilter); // row[3] is Type
+        }
+
+        gridInstance.updateConfig({
+            data: filtered
+        }).forceRender();
     }
 
     async function renderFlatList(matcher) {
-        // Collect all files recursively
-        const files = [];
+        const list = document.getElementById('file-list');
+        if (!list) return;
 
-        // Simple customized traversal for flat list path-tracking
-        async function traverseWithPaths(entry, path) {
-            if (FileFlow.state.appSettings.excludeDots && entry.name.startsWith('.')) return;
+        list.innerHTML = '';
+        list.classList.remove('file-tree');
+        list.classList.add('file-grid');
 
-            if (entry.isFile) {
-                files.push({ entry, path: path + entry.name });
-            } else if (entry.isDirectory) {
-                const children = await FileSystem.readDir(entry);
-                for (const child of children) {
-                    await traverseWithPaths(child, path + entry.name + '/');
+        const fileEntries = [];
+
+        // Recursive collector
+        async function traverseWithPaths(entries) {
+            for (const entry of entries) {
+                if (!shouldInclude(entry)) continue;
+
+                if (entry.isDirectory) {
+                    const children = await FileFlow.utils.FileSystem.readDir(entry);
+                    await traverseWithPaths(children);
+                } else {
+                    // Check filter
+                    if (matcher && !matcher(entry.name)) continue;
+                    fileEntries.push(entry);
                 }
             }
         }
 
-        for (const root of FileFlow.state.currentRootEntries) {
-            await traverseWithPaths(root, '');
+        await traverseWithPaths(FileFlow.state.currentRootEntries);
+
+        // Prepare Data for Grid.js
+        const gridData = [];
+        await Promise.all(fileEntries.map(async (item) => {
+            let size = 0;
+            let date = null;
+            let type = item.name.split('.').pop();
+            if (type === item.name) type = ''; // No extension
+
+            try {
+                const file = await item.getFile();
+                size = file.size;
+                date = file.lastModified;
+            } catch (e) { console.warn("Metadata read error", e); }
+
+            gridData.push([
+                item.name,
+                size,
+                date,
+                type
+            ]);
+        }));
+
+        // Store Original Data for Filtering
+        originalGridData = gridData;
+
+        if (gridInstance) {
+            // Grid.js cleanup if needed
         }
 
-        files.sort((a, b) => a.path.localeCompare(b.path));
+        const gridWrapper = document.createElement('div');
+        list.appendChild(gridWrapper);
 
-        const fragment = document.createDocumentFragment();
+        // Generate Type Options for Dropdown
+        const uniqueTypes = [...new Set(gridData.map(r => r[3]))].sort();
+        const typeOptions = uniqueTypes.map(t => `<option value="${t}">${t || '(None)'}</option>`).join('');
 
-        for (const item of files) {
-            if (matcher && !matcher(item.path)) continue; // Filter Path
+        // Custom Header HTML for Type
+        const typeHeaderHtml = `
+            <div style="display:flex; align-items:center; justify-content:space-between;">
+                Type
+                <select 
+                    onclick="event.stopPropagation()" 
+                    onchange="FileFlow.ui.Render.onTypeFilterChange(this.value)"
+                    style="
+                        background-color: var(--bg-color); 
+                        color: var(--text-primary); 
+                        border: 1px solid var(--border-color); 
+                        border-radius: 4px; 
+                        padding: 2px; 
+                        font-size: 0.75rem;
+                        margin-left: 5px;
+                        max-width: 80px;
+                    "
+                >
+                    <option value="">All</option>
+                    ${typeOptions}
+                </select>
+            </div>
+        `;
 
-            const li = document.createElement('li');
-            const itemDiv = document.createElement('div');
-            itemDiv.className = 'item file-item';
-            itemDiv.entry = item.entry;
-
-            itemDiv.innerHTML = `
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="file-icon">
-                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                    <polyline points="13 2 13 9 20 9"></polyline>
-                </svg>
-                <span class="file-name">${item.path}</span>
-             `;
-            li.appendChild(itemDiv);
-            fragment.appendChild(li);
-        }
-
-        const list = document.getElementById('file-list');
-        if (list) list.appendChild(fragment);
+        gridInstance = new gridjs.Grid({
+            columns: [
+                {
+                    name: 'Name',
+                    width: '50%',
+                    formatter: (cell) => gridjs.html(`<span class="grid-filename" title="${cell}">${cell}</span>`)
+                },
+                {
+                    name: 'Size',
+                    width: '15%',
+                    formatter: (cell) => formatBytes(cell)
+                },
+                {
+                    name: 'Date',
+                    width: '25%',
+                    formatter: (cell) => formatDate(cell)
+                },
+                {
+                    name: gridjs.html(typeHeaderHtml),
+                    id: 'Type',
+                    width: '15%',
+                    sort: false // Disable sort on header click for this column
+                }
+            ],
+            data: gridData,
+            search: true,
+            sort: true,
+            pagination: { limit: 20 },
+            style: {
+                table: { 'width': '100%' },
+                th: {
+                    'background-color': 'var(--bg-secondary)',
+                    'color': 'var(--text-primary)',
+                    'border': '1px solid var(--border-color)'
+                },
+                td: {
+                    'background-color': 'var(--bg-primary)',
+                    'color': 'var(--text-secondary)',
+                    'border': '1px solid var(--border-color)'
+                }
+            },
+            className: {
+                table: 'custom-grid-table',
+                th: 'custom-grid-th',
+                td: 'custom-grid-td'
+            }
+        }).render(gridWrapper);
     }
 
     function shouldInclude(entry) {
@@ -275,7 +304,6 @@
 
         list.innerHTML = '';
 
-        // Prepare Matcher
         const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
 
         if (FileFlow.state.currentRootEntries.length > 0) {
@@ -290,13 +318,9 @@
                         const element = await createTreeElement(entry, matcher);
                         if (element) {
                             list.appendChild(element);
-
-                            // Manual auto-expand if no filter and single root
                             if (!matcher && shouldAutoExpand) {
                                 const itemDiv = element.querySelector('.item.folder-toggle');
-                                if (itemDiv) {
-                                    await toggleFolder(itemDiv);
-                                }
+                                if (itemDiv) await toggleFolder(itemDiv);
                             }
                         }
                     }
@@ -312,13 +336,33 @@
     }
 
     function applyFilter() {
-        // Just trigger render, logic is inside render now
         renderFileList();
     }
 
+    // Export to Namespace
     FileFlow.ui.Render = {
         renderFileList: renderFileList,
-        applyFilter: applyFilter
+        applyFilter: applyFilter,
+        onTypeFilterChange: filterGridDataType
+    };
+
+    // FIX: Renamed from Toast to Status to match main.js usage
+    FileFlow.ui.Status = {
+        show: showStatus,
+        hide: (delay = 0) => {
+            if (statusToast) {
+                if (delay > 0) {
+                    setTimeout(() => statusToast.classList.add('hidden'), delay);
+                } else {
+                    statusToast.classList.add('hidden');
+                }
+            }
+        },
+        error: (message) => showStatus(`Error: ${message}`, false)
+    };
+
+    FileFlow.ui.ElementFactory = {
+        createTreeElement: createTreeElement
     };
 
 })();
