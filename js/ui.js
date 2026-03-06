@@ -451,7 +451,7 @@
             data: gridData,
             search: true,
             sort: true,
-            pagination: { limit: 100 },
+            pagination: { limit: 500 },
             style: {
                 table: { 'width': '100%' },
                 th: {

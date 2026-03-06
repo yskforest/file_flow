@@ -5,7 +5,8 @@ window.FileFlow = {
         appSettings: {
             viewMode: 'tree', // 'tree' or 'list'
             actionMode: 'md',   // 'md', 'txt', 'detect'
-            excludeDots: true
+            excludeDots: true,
+            showFullPath: true
         },
         entryMetadata: {}, // Persist action results by fullPath
         searchQuery: ''
