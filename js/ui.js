@@ -352,18 +352,21 @@
 
         const fileEntries = [];
 
-        // Recursive collector
-        async function traverseWithPaths(entries) {
+        // Recursive collector with virtual path building
+        async function traverseWithPaths(entries, currentPath = '') {
             for (const entry of entries) {
                 if (!shouldInclude(entry)) continue;
 
+                // Build relative path string
+                const entryPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+
                 if (entry.isDirectory) {
                     const children = await FileFlow.utils.FileSystem.readDir(entry);
-                    await traverseWithPaths(children);
+                    await traverseWithPaths(children, entryPath);
                 } else {
                     // Check filter
                     if (matcher && !matcher(entry.name)) continue;
-                    fileEntries.push(entry);
+                    fileEntries.push({ handle: entry, path: entryPath });
                 }
             }
         }
@@ -372,20 +375,22 @@
 
         // Prepare Data for Grid.js
         const gridData = [];
+        const showFull = FileFlow.state.appSettings.showFullPath;
+
         await Promise.all(fileEntries.map(async (item) => {
             let size = 0;
             let date = null;
-            let type = item.name.split('.').pop();
-            if (type === item.name) type = ''; // No extension
+            let type = item.handle.name.split('.').pop();
+            if (type === item.handle.name) type = ''; // No extension
 
             try {
-                const file = await item.getFile();
+                const file = await item.handle.getFile();
                 size = file.size;
                 date = file.lastModified;
             } catch (e) { console.warn("Metadata read error", e); }
 
             gridData.push([
-                item.name,
+                showFull ? item.path : item.handle.name,
                 size,
                 date,
                 type

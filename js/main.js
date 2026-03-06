@@ -27,8 +27,35 @@
 
     // Init
     function init() {
+        loadSettings();
         setupEventListeners();
         updateModeDisplay();
+    }
+
+    function loadSettings() {
+        try {
+            const saved = localStorage.getItem('FileFlowSettings');
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                State.appSettings = { ...State.appSettings, ...parsed };
+            }
+        } catch (e) { console.warn("Failed to load settings", e); }
+
+        // Sync UI
+        const dotCheck = document.getElementById('exclude-dots-checkbox');
+        if (dotCheck) dotCheck.checked = State.appSettings.excludeDots;
+        
+        const fullPathCheck = document.getElementById('show-fullpath-checkbox');
+        if (fullPathCheck) fullPathCheck.checked = State.appSettings.showFullPath;
+
+        const modeRadio = document.querySelector(`input[name="action-mode"][value="${State.appSettings.actionMode}"]`);
+        if (modeRadio) modeRadio.checked = true;
+    }
+
+    function saveSettings() {
+        try {
+            localStorage.setItem('FileFlowSettings', JSON.stringify(State.appSettings));
+        } catch (e) { console.warn("Failed to save settings", e); }
     }
 
     function setupEventListeners() {
@@ -102,15 +129,28 @@
         modeRadios.forEach(radio => {
             radio.addEventListener('change', (e) => {
                 State.appSettings.actionMode = e.target.value;
+                saveSettings(); // Save change
                 updateModeDisplay();
             });
         });
 
         const dotCheck = document.getElementById('exclude-dots-checkbox');
-        dotCheck.addEventListener('change', (e) => {
-            State.appSettings.excludeDots = e.target.checked;
-            Render.renderFileList();
-        });
+        if (dotCheck) {
+            dotCheck.addEventListener('change', (e) => {
+                State.appSettings.excludeDots = e.target.checked;
+                saveSettings(); // Save change
+                Render.renderFileList();
+            });
+        }
+
+        const fullPathCheck = document.getElementById('show-fullpath-checkbox');
+        if (fullPathCheck) {
+            fullPathCheck.addEventListener('change', (e) => {
+                State.appSettings.showFullPath = e.target.checked;
+                saveSettings(); // Save change
+                Render.renderFileList();
+            });
+        }
 
         // Mode Button (Quick Switch? Or just display?)
         modeDisplayBtn.addEventListener('click', () => {
