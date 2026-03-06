@@ -141,16 +141,204 @@
     }
 
     // Custom Filter Logic for Grid.js
-    function filterGridDataType(typeFilter) {
-        if (!gridInstance) return;
+    let activeFilters = { 0: [], 1: [], 2: [], 3: [] }; // Name, Size, Date, Type
+    let currentFilterColIndex = null;
 
+    function getFormattedColumnValue(row, colIndex) {
+        if (colIndex === 1) return formatBytes(row[colIndex]);
+        if (colIndex === 2) return formatDate(row[colIndex]);
+        return row[colIndex] || '(None)';
+    }
+
+    function toggleFilterMenu(btnElement, colIndex, colName) {
+        let menu = document.getElementById('grid-filter-menu');
+        if (!menu) {
+            menu = document.createElement('div');
+            menu.id = 'grid-filter-menu';
+            menu.className = 'filter-popover hidden';
+            document.body.appendChild(menu);
+
+            // Close on click outside
+            document.addEventListener('click', (e) => {
+                if (!menu.contains(e.target) && !e.target.closest('.filter-icon-btn')) {
+                    menu.classList.add('hidden');
+                }
+            });
+        }
+
+        // If clicking the same open menu, close it
+        if (!menu.classList.contains('hidden') && currentFilterColIndex === colIndex) {
+            menu.classList.add('hidden');
+            return;
+        }
+
+        currentFilterColIndex = colIndex;
+
+        // Get unique values from original data for this column
+        const uniqueValues = [...new Set(originalGridData.map(r => getFormattedColumnValue(r, colIndex)))];
+        
+        // Sort the unique values depending on column type
+        uniqueValues.sort((a,b) => {
+            if(a === '(None)') return 1;
+            if(b === '(None)') return -1;
+            // For Size/Date filters we sort alphabetically by the formatted string for the checkbox list, 
+            // the actual Grid sorting will be type-aware.
+            return String(a).localeCompare(String(b)); 
+        });
+
+        // Current active filters for this column (if empty, assume all selected)
+        const activeColFilters = activeFilters[colIndex];
+        const isAllSelected = activeColFilters.length === 0 || activeColFilters.length === uniqueValues.length;
+
+        // Build HTML
+        let html = `
+            <div class="filter-actions">
+                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex}, 'asc')" class="text-btn outline">Sort Ascending</button>
+                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex}, 'desc')" class="text-btn outline">Sort Descending</button>
+            </div>
+            <hr class="filter-divider">
+            <div class="filter-search-container">
+                <input type="text" id="grid-filter-search" class="search-input full-width" placeholder="Search ${colName}..." onkeyup="FileFlow.ui.Render.filterCheckboxes(this.value)">
+            </div>
+            <div class="filter-bulk-actions">
+                <a href="#" onclick="event.preventDefault(); FileFlow.ui.Render.toggleAllCheckboxes(true)">Select All</a> - 
+                <a href="#" onclick="event.preventDefault(); FileFlow.ui.Render.toggleAllCheckboxes(false)">Clear</a>
+            </div>
+            <div class="filter-options-list" id="grid-checkbox-list">
+        `;
+
+        uniqueValues.forEach(val => {
+            const isChecked = isAllSelected || activeColFilters.includes(val) ? 'checked' : '';
+            html += `
+                <label class="filter-checkbox-item">
+                    <input type="checkbox" value="${val}" ${isChecked}>
+                    <span class="type-label" title="${val}">${val}</span>
+                </label>
+            `;
+        });
+
+        html += `
+            </div>
+            <div class="filter-footer">
+                <button onclick="document.getElementById('grid-filter-menu').classList.add('hidden')" class="text-btn outline">Cancel</button>
+                <button onclick="FileFlow.ui.Render.applyColumnFilter()" class="text-btn">Apply</button>
+            </div>
+        `;
+
+        menu.innerHTML = html;
+
+        // Position menu relative to the button
+        const rect = btnElement.getBoundingClientRect();
+        menu.style.top = (rect.bottom + window.scrollY + 8) + 'px';
+        menu.style.left = (rect.left + window.scrollX - 200 + rect.width) + 'px'; // Align right edge approximately
+
+        menu.classList.remove('hidden');
+        
+        // Focus search
+        setTimeout(() => {
+            const searchInput = document.getElementById('grid-filter-search');
+            if (searchInput) searchInput.focus();
+        }, 50);
+    }
+
+    function toggleAllCheckboxes(check) {
+        const list = document.getElementById('grid-checkbox-list');
+        if (!list) return;
+        const checkboxes = list.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            if (cb.parentElement.style.display !== 'none') {
+                cb.checked = check;
+            }
+        });
+    }
+
+    function filterCheckboxes(query) {
+        const list = document.getElementById('grid-checkbox-list');
+        if (!list) return;
+        const labels = list.querySelectorAll('.filter-checkbox-item');
+        const lowerQuery = query.toLowerCase();
+        labels.forEach(label => {
+            const text = label.querySelector('.type-label').textContent.toLowerCase();
+            if (text.includes(lowerQuery)) {
+                label.style.display = 'flex';
+            } else {
+                label.style.display = 'none';
+            }
+        });
+    }
+
+    function applyColumnFilter() {
+        const menu = document.getElementById('grid-filter-menu');
+        if (!menu || currentFilterColIndex === null) return;
+        
+        const checkboxes = menu.querySelectorAll('input[type="checkbox"]');
+        const selected = [];
+        let allCount = 0;
+        checkboxes.forEach(cb => {
+            allCount++;
+            if (cb.checked) selected.push(cb.value);
+        });
+
+        // If all are selected, we can just clear the active filter for this column
+        if (selected.length === allCount || selected.length === 0) {
+            activeFilters[currentFilterColIndex] = [];
+        } else {
+            activeFilters[currentFilterColIndex] = selected;
+        }
+
+        menu.classList.add('hidden');
+
+        // Apply to Grid (Cumulative filtering across all columns)
+        if (!gridInstance) return;
+        
         let filtered = originalGridData;
-        if (typeFilter && typeFilter !== "") {
-            filtered = filtered.filter(row => row[3] === typeFilter); // row[3] is Type
+        
+        // Loop through each column's filters
+        for (let col = 0; col < 4; col++) {
+            if (activeFilters[col] && activeFilters[col].length > 0) {
+                filtered = filtered.filter(row => {
+                    const rowVal = getFormattedColumnValue(row, col);
+                    return activeFilters[col].includes(rowVal);
+                });
+            }
         }
 
         gridInstance.updateConfig({
             data: filtered
+        }).forceRender();
+    }
+
+    function sortGridByColumn(colIndex, direction) {
+        const menu = document.getElementById('grid-filter-menu');
+        if (menu) menu.classList.add('hidden');
+        
+        if (!gridInstance) return;
+
+        let dataToSort = [...gridInstance.config.data]; // Sort current filtered view
+        
+        dataToSort.sort((a, b) => {
+            let valA = a[colIndex];
+            let valB = b[colIndex];
+            
+            // Numeric Sort (Size or Date timestamp)
+            if (colIndex === 1 || colIndex === 2) {
+                valA = Number(valA) || 0;
+                valB = Number(valB) || 0;
+                return direction === 'asc' ? valA - valB : valB - valA;
+            }
+            
+            // String sort (Name or Type)
+            valA = String(valA || '');
+            valB = String(valB || '');
+            if (direction === 'asc') {
+                return valA.localeCompare(valB);
+            } else {
+                return valB.localeCompare(valA);
+            }
+        });
+
+        gridInstance.updateConfig({
+            data: dataToSort
         }).forceRender();
     }
 
@@ -215,53 +403,46 @@
         gridWrapper.style.height = '100%';
         list.appendChild(gridWrapper);
 
-        // Generate Type Options for Dropdown
-        const uniqueTypes = [...new Set(gridData.map(r => r[3]))].sort();
-        const typeOptions = uniqueTypes.map(t => `<option value="${t}">${t || '(None)'}</option>`).join('');
-
-        // Custom Header HTML for Type
-        const typeHeaderHtml = `
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-                Type
-                <select 
-                    onclick="event.stopPropagation()" 
-                    onchange="FileFlow.ui.Render.onTypeFilterChange(this.value)"
-                    style="
-                        background-color: var(--bg-color); 
-                        color: var(--text-primary); 
-                        border: 1px solid var(--border-color); 
-                        border-radius: 4px; 
-                        padding: 2px; 
-                        font-size: 0.75rem;
-                        margin-left: 5px;
-                        max-width: 80px;
-                    "
-                >
-                    <option value="">All</option>
-                    ${typeOptions}
-                </select>
-            </div>
-        `;
+        function createHeaderHTML(colName, colIndex) {
+            return `
+                <div style="display:flex; align-items:center; justify-content:space-between; position: relative;">
+                    ${colName}
+                    <button 
+                        class="filter-icon-btn" 
+                        title="Filter / Sort by ${colName}"
+                        onclick="event.stopPropagation(); FileFlow.ui.Render.toggleFilterMenu(this, ${colIndex}, '${colName}')"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+                    </button>
+                </div>
+            `;
+        }
 
         gridInstance = new gridjs.Grid({
             columns: [
                 {
-                    name: 'Name',
+                    name: gridjs.html(createHeaderHTML('Name', 0)),
+                    id: 'Name',
                     width: '50%',
-                    formatter: (cell) => gridjs.html(`<span class="grid-filename" title="${cell}">${cell}</span>`)
+                    formatter: (cell) => gridjs.html(`<span class="grid-filename" title="${cell}">${cell}</span>`),
+                    sort: false // Handled by custom filter popover
                 },
                 {
-                    name: 'Size',
+                    name: gridjs.html(createHeaderHTML('Size', 1)),
+                    id: 'Size',
                     width: '15%',
-                    formatter: (cell) => formatBytes(cell)
+                    formatter: (cell) => formatBytes(cell),
+                    sort: false // Handled by custom filter popover
                 },
                 {
-                    name: 'Date',
+                    name: gridjs.html(createHeaderHTML('Date', 2)),
+                    id: 'Date',
                     width: '25%',
-                    formatter: (cell) => formatDate(cell)
+                    formatter: (cell) => formatDate(cell),
+                    sort: false // Handled by custom filter popover
                 },
                 {
-                    name: gridjs.html(typeHeaderHtml),
+                    name: gridjs.html(createHeaderHTML('Type', 3)),
                     id: 'Type',
                     width: '15%',
                     sort: false // Disable sort on header click for this column
@@ -344,7 +525,11 @@
     FileFlow.ui.Render = {
         renderFileList: renderFileList,
         applyFilter: applyFilter,
-        onTypeFilterChange: filterGridDataType
+        toggleFilterMenu: toggleFilterMenu,
+        sortGridByColumn: sortGridByColumn,
+        filterCheckboxes: filterCheckboxes,
+        toggleAllCheckboxes: toggleAllCheckboxes,
+        applyColumnFilter: applyColumnFilter
     };
 
     // FIX: Renamed from Toast to Status to match main.js usage

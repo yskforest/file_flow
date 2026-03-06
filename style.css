@@ -650,3 +650,136 @@ tr.gridjs-tr.gridjs-tr-selected .grid-filename {
 .gridjs-loading-bar {
     background-color: var(--accent-color);
 }
+
+/* --- Custom Grid.js Filter Popover (Google Sheets Style) --- */
+.filter-icon-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.filter-icon-btn:hover {
+    background-color: rgba(255,255,255,0.1);
+    color: var(--text-primary);
+}
+
+.filter-popover {
+    position: absolute;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+    padding: 12px;
+    width: 240px;
+    z-index: 9999;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: normal;
+}
+
+.filter-popover.hidden {
+    display: none;
+}
+
+.filter-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.filter-actions .text-btn.outline {
+    background: none;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    text-align: left;
+    padding: 6px 10px;
+}
+
+.filter-actions .text-btn.outline:hover {
+    background-color: rgba(255,255,255,0.05);
+    border-color: var(--accent-color);
+}
+
+.filter-divider {
+    border: 0;
+    height: 1px;
+    background-color: var(--border-color);
+    margin: 10px 0;
+}
+
+.filter-search-container {
+    margin-bottom: 8px;
+}
+
+.filter-search-container input {
+    width: 100%;
+    padding: 6px 8px;
+    box-sizing: border-box;
+}
+
+.filter-bulk-actions {
+    margin-bottom: 8px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.filter-bulk-actions a {
+    color: var(--accent-color);
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.filter-bulk-actions a:hover {
+    text-decoration: underline;
+}
+
+.filter-options-list {
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 4px;
+    background-color: rgba(15, 23, 42, 0.5); /* slightly darker */
+    margin-bottom: 12px;
+}
+
+.filter-checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.filter-checkbox-item:hover {
+    background-color: rgba(255,255,255,0.05);
+}
+
+.filter-checkbox-item input[type="checkbox"] {
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.filter-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.filter-footer .outline {
+    background: none;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.filter-footer .outline:hover {
+    background-color: rgba(255,255,255,0.05);
+}
