@@ -212,6 +212,7 @@
         }
 
         const gridWrapper = document.createElement('div');
+        gridWrapper.style.height = '100%';
         list.appendChild(gridWrapper);
 
         // Generate Type Options for Dropdown
@@ -269,7 +270,7 @@
             data: gridData,
             search: true,
             sort: true,
-            pagination: { limit: 20 },
+            pagination: { limit: 100 },
             style: {
                 table: { 'width': '100%' },
                 th: {
