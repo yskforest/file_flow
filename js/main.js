@@ -286,6 +286,8 @@
 
         let totalFiles = 0;
         let totalFolders = 0;
+        let ignoredFoldersByType = {}; // Track ignored folders based on name
+        let totalFileSize = 0;
         const extCounts = {};
         const matcher = FileFlow.utils.Glob.createMatcher(State.searchQuery);
 
@@ -293,9 +295,22 @@
             State.currentRootEntries,
             async (entry) => {
                 const isMatch = matcher ? matcher(entry.name) : true;
+                
+                // Track ignored folders (started with dotted logic currently hardcoded in traverse if excludeDots=true, 
+                // but we need to intercept it here, or inside traverse itself.)
+                // Since traverse skips it BEFORE calling visitFn, we need a custom traverse or we just assume we 
+                // handle the check here and tell traverse to NOT exclude dots.
+                // Wait, traverse actually does: `if (options.excludeDots && entry.name.startsWith('.')) continue;`
+                // Let's change the traverse call options to allow dots, so we can count them, then return false to skip them!
+                
+                if (State.appSettings.excludeDots && entry.name.startsWith('.')) {
+                    if (entry.isDirectory) {
+                        ignoredFoldersByType[entry.name] = (ignoredFoldersByType[entry.name] || 0) + 1;
+                    }
+                    return false; // Skip recursing into this folder
+                }
 
                 if (entry.isDirectory) {
-                    // If filter is active, only count matching folders (or logic can be adjusted)
                     if (!matcher || isMatch) {
                         totalFolders++;
                     }
@@ -305,21 +320,50 @@
                         const name = entry.name;
                         const ext = name.includes('.') ? '.' + name.split('.').pop().toLowerCase() : 'no-ext';
                         extCounts[ext] = (extCounts[ext] || 0) + 1;
+
+                        // Calculate Size
+                        const pathKey = entry.fullPath || name;
+                        const meta = State.entryMetadata[pathKey];
+                        if (meta && meta.size !== undefined) {
+                            totalFileSize += meta.size;
+                        } else {
+                            // Fetch size manually if not in cache
+                            try {
+                                const file = await new Promise((resolve) => entry.file(resolve));
+                                totalFileSize += file.size;
+                            } catch (e) { /* ignore */ }
+                        }
                     }
                 }
                 return true; // Recurse
             },
-            { excludeDots: State.appSettings.excludeDots }
+            { excludeDots: false } // We handle exclusion manually above to count them!
         );
 
         Status.hide();
-        return { totalFiles, totalFolders, extCounts };
+        return { totalFiles, totalFolders, extCounts, totalFileSize, ignoredFoldersByType };
+    }
+
+    function formatBytes(bytes, decimals = 2) {
+        if (!+bytes) return '0 Bytes';
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['Bytes', 'KiB', 'MiB', 'GiB', 'TiB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
     }
 
     function renderStats(stats) {
         const container = document.getElementById('stats-content');
+        let totalIgnored = 0;
+        for (const count of Object.values(stats.ignoredFoldersByType)) totalIgnored += count;
+
         let html = `
-            <div class="stats-summary">
+            <div class="stats-summary" style="margin-bottom: 20px;">
+                <div class="stat-box">
+                     <div class="label">Total Size</div>
+                     <div class="value">${formatBytes(stats.totalFileSize)}</div>
+                </div>
                 <div class="stat-box">
                      <div class="label">Files</div>
                      <div class="value">${stats.totalFiles}</div>
@@ -328,18 +372,51 @@
                      <div class="label">Folders</div>
                      <div class="value">${stats.totalFolders}</div>
                 </div>
+                <div class="stat-box" style="border-left: 1px solid var(--border-color); padding-left: 15px;">
+                     <div class="label" style="color: var(--text-muted);">Ignored Folders</div>
+                     <div class="value" style="color: var(--text-muted);">${totalIgnored}</div>
+                </div>
             </div>
-            <h3>Extensions</h3>
-            <table class="stats-table">
-                <thead><tr><th>Extension</th><th>Count</th></tr></thead>
-                <tbody>
+            
+            <div style="display: flex; gap: 20px; text-align: left;">
+                <div style="flex: 1;">
+                    <h3>Extensions</h3>
+                    <table class="stats-table">
+                        <thead><tr><th>Extension</th><th>Count</th></tr></thead>
+                        <tbody>
         `;
 
         const sortedExts = Object.entries(stats.extCounts).sort((a, b) => b[1] - a[1]);
         for (const [ext, count] of sortedExts) {
             html += `<tr><td>${ext}</td><td>${count}</td></tr>`;
         }
-        html += '</tbody></table>';
+        
+        html += `
+                        </tbody>
+                    </table>
+                </div>
+        `;
+
+        if (totalIgnored > 0) {
+            html += `
+                <div style="flex: 1;">
+                    <h3 style="color: var(--text-muted);">Ignored Details</h3>
+                    <table class="stats-table" style="color: var(--text-muted);">
+                        <thead><tr><th>Folder Name</th><th>Count</th></tr></thead>
+                        <tbody>
+            `;
+            const sortedIgnored = Object.entries(stats.ignoredFoldersByType).sort((a, b) => b[1] - a[1]);
+            for (const [fname, count] of sortedIgnored) {
+                html += `<tr><td>${fname}</td><td>${count}</td></tr>`;
+            }
+            html += `
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        html += `</div>`; // Close flex container
         container.innerHTML = html;
     }
 
