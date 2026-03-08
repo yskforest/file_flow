@@ -391,7 +391,7 @@
             if (type === item.handle.name) type = ''; // No extension
 
             try {
-                const file = await item.handle.getFile();
+                const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
                 size = file.size;
                 date = file.lastModified;
             } catch (e) { console.warn("Metadata read error", e); }
