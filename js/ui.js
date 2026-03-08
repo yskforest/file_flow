@@ -178,8 +178,19 @@
 
         currentFilterColIndex = colIndex;
 
-        // Get unique values from original data for this column
-        const uniqueValues = [...new Set(originalGridData.map(r => getFormattedColumnValue(r, colIndex)))];
+        // Build a dataset filtered by ALL OTHER active column filters, ignoring THIS column's filter.
+        let baseDataForMenu = [...originalGridData];
+        for (let c = 0; c < 6; c++) {
+            if (c !== colIndex && activeFilters[c] && activeFilters[c].length > 0) {
+                baseDataForMenu = baseDataForMenu.filter(row => {
+                    const rowVal = getFormattedColumnValue(row, c);
+                    return activeFilters[c].includes(String(rowVal));
+                });
+            }
+        }
+
+        // Get unique values from this filtered base data for the current column
+        const uniqueValues = [...new Set(baseDataForMenu.map(r => getFormattedColumnValue(r, colIndex)))];
         
         // Sort the unique values depending on column type
         uniqueValues.sort((a,b) => {
@@ -314,6 +325,24 @@
         gridInstance.updateConfig({
             data: processed
         }).forceRender();
+
+        // Update Filter Icons UI
+        setTimeout(() => {
+            const buttons = document.querySelectorAll('.filter-icon-btn');
+            for (let c = 0; c < 6; c++) {
+                if (buttons[c]) {
+                    if (activeFilters[c] && activeFilters[c].length > 0) {
+                        buttons[c].classList.add('active');
+                        buttons[c].style.color = 'var(--accent-color)';
+                        buttons[c].style.backgroundColor = 'rgba(var(--accent-color-rgb), 0.1)';
+                    } else {
+                        buttons[c].classList.remove('active');
+                        buttons[c].style.color = '';
+                        buttons[c].style.backgroundColor = '';
+                    }
+                }
+            }
+        }, 50); // slight delay to ensure Grid.js finished rendering headers
     }
 
     function applyColumnFilter() {
@@ -494,11 +523,17 @@
         list.appendChild(gridWrapper);
 
         function createHeaderHTML(colName, colIndex) {
+            // Apply immediately if already active
+            const isActive = activeFilters[colIndex] && activeFilters[colIndex].length > 0;
+            const colorStyle = isActive ? 'color: var(--accent-color); background-color: rgba(var(--accent-color-rgb, 0,122,255), 0.1);' : '';
+            const activeClass = isActive ? 'active' : '';
+
             return `
                 <div style="display:flex; align-items:center; justify-content:space-between; position: relative;">
                     ${colName}
                     <button 
-                        class="filter-icon-btn" 
+                        class="filter-icon-btn ${activeClass}" 
+                        style="${colorStyle}"
                         title="Filter / Sort by ${colName}"
                         onclick="event.stopPropagation(); FileFlow.ui.Render.toggleFilterMenu(this, ${colIndex}, '${colName}')"
                     >
