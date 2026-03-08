@@ -537,13 +537,12 @@ main {
     display: flex;
     flex-direction: column;
     height: 100%;
-    min-height: 0;
 }
 
 .gridjs-wrapper {
     flex-grow: 1;
-    overflow-y: auto !important;
-    min-height: 0;
+    overflow: auto !important; /* Vital for fixed header */
+    height: 1px; /* Force flex container to provide scrollbar instead of stretching */
 }
 
 .file-grid {
@@ -579,9 +578,8 @@ th.gridjs-th {
     background-color: var(--card-bg) !important;
     color: var(--text-secondary) !important;
     border-color: var(--border-color) !important;
-    position: sticky;
-    top: 0;
-    z-index: 10;
+    /* Removed custom sticky positioning because Grid.js fixedHeader plugin handles it internally using position: sticky automatically */
+    z-index: 10 !important;
 }
 
 th.gridjs-th:hover {
@@ -594,6 +592,9 @@ td.gridjs-td {
     color: var(--text-primary) !important;
     border-color: var(--border-color) !important;
     padding: 0.6rem 1rem !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
 }
 
 /* FOOTER FIX */
@@ -605,6 +606,11 @@ td.gridjs-td {
 
 /* ROW HOVER & SELECTION FIX (High Contrast Mode) */
 /* Hover & Selection - Inverted Colors for Maximum Visibility */
+tr.gridjs-tr {
+    position: relative;
+    z-index: 1;
+}
+
 tr.gridjs-tr:hover td.gridjs-td,
 tr.gridjs-tr.gridjs-tr-selected td.gridjs-td {
     background-color: var(--accent-color) !important;
@@ -645,6 +651,11 @@ tr.gridjs-tr.gridjs-tr-selected .grid-filename {
     font-family: 'Consolas', monospace;
     color: inherit;
     /* Inherit from td */
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .gridjs-loading-bar {

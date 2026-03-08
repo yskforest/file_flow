@@ -351,18 +351,25 @@
         list.classList.add('file-grid');
 
         const fileEntries = [];
+        const rootEntries = FileFlow.state.currentRootEntries;
+        const isSingleRootFolder = rootEntries.length === 1 && rootEntries[0].isDirectory;
 
         // Recursive collector with virtual path building
-        async function traverseWithPaths(entries, currentPath = '') {
+        async function traverseWithPaths(entries, currentPath = '', depth = 0) {
             for (const entry of entries) {
                 if (!shouldInclude(entry)) continue;
 
                 // Build relative path string
-                const entryPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+                let entryPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+
+                // Exclude root folder name if single folder drop
+                if (isSingleRootFolder && depth === 0) {
+                    entryPath = ''; 
+                }
 
                 if (entry.isDirectory) {
                     const children = await FileFlow.utils.FileSystem.readDir(entry);
-                    await traverseWithPaths(children, entryPath);
+                    await traverseWithPaths(children, entryPath, depth + 1);
                 } else {
                     // Check filter
                     if (matcher && !matcher(entry.name)) continue;
@@ -371,7 +378,7 @@
             }
         }
 
-        await traverseWithPaths(FileFlow.state.currentRootEntries);
+        await traverseWithPaths(rootEntries, '', 0);
 
         // Prepare Data for Grid.js
         const gridData = [];
@@ -456,9 +463,11 @@
             data: gridData,
             search: true,
             sort: true,
+            resizable: true,
             pagination: { limit: 500 },
+            fixedHeader: true,
+            height: '100%',
             style: {
-                table: { 'width': '100%' },
                 th: {
                     'background-color': 'var(--bg-secondary)',
                     'color': 'var(--text-primary)',
