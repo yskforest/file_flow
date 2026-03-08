@@ -86,9 +86,9 @@
                 }
 
                 try {
-                    Status.show("Scanning files...");
-                    // Small delay to let UI render
-                    await new Promise(r => setTimeout(r, 50));
+                    Status.show("Scanning files...", true);
+                    // Yield to render the toast with spinner before long synchronous operations
+                    await new Promise(r => setTimeout(r, 50)); 
 
                     await handleEntries(entries);
                     Status.hide(500);
@@ -231,6 +231,24 @@
                 Status.hide();
             }
         });
+
+        // Download CSV
+        const downloadCsvBtn = document.getElementById('download-csv-btn');
+        if (downloadCsvBtn) {
+            downloadCsvBtn.addEventListener('click', () => {
+                if (State.appSettings.viewMode !== 'list') {
+                    Status.error("CSV download is only available in List View");
+                    return;
+                }
+                try {
+                    Render.downloadCsv();
+                    Status.show("CSV downloaded successfully");
+                } catch (e) {
+                    console.error(e);
+                    Status.error("CSV creation failed");
+                }
+            });
+        }
 
         // Stats (Deep Scan)
         statsBtn.addEventListener('click', async () => {

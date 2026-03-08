@@ -6,6 +6,11 @@
 
     let gridInstance = null;
     let originalGridData = []; // Store full dataset locally for filtering
+    let currentGridData = []; // Store currently filtered/sorted dataset
+    
+    let activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] }; // Name, Size, Date, Type, Encode, EOL
+    let currentSort = { colIndex: null, direction: 'asc' };
+    let currentFilterColIndex = null;
 
     function showStatus(message, isLoading = false) {
         if (!statusToast || !statusText) return;
@@ -140,14 +145,13 @@
         return new Date(date).toLocaleString();
     }
 
-    // Custom Filter Logic for Grid.js
-    let activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] }; // Name, Size, Date, Type, Encode, EOL
-    let currentFilterColIndex = null;
-
     function getFormattedColumnValue(row, colIndex) {
-        if (colIndex === 1) return formatBytes(row[colIndex]);
-        if (colIndex === 2) return formatDate(row[colIndex]);
-        return row[colIndex] || '(None)';
+        // Now row is strictly a raw Array [v1, v2, ...]
+        const val = row[colIndex];
+        
+        if (colIndex === 1) return formatBytes(val);
+        if (colIndex === 2) return formatDate(val);
+        return String(val || '(None)');
     }
 
     function toggleFilterMenu(btnElement, colIndex, colName) {
@@ -267,6 +271,51 @@
         });
     }
 
+    function applyFiltersAndSort() {
+        if (!gridInstance) return;
+        
+        let processed = [...originalGridData];
+        
+        // 1. Filter
+        for (let col = 0; col < 6; col++) {
+            if (activeFilters[col] && activeFilters[col].length > 0) {
+                processed = processed.filter(row => {
+                    const rowVal = getFormattedColumnValue(row, col);
+                    // Match the stored string values
+                    return activeFilters[col].includes(String(rowVal));
+                });
+            }
+        }
+        
+        // 2. Sort
+        if (currentSort.colIndex !== null) {
+            const colIndex = currentSort.colIndex;
+            const dir = currentSort.direction;
+            
+            processed.sort((a, b) => {
+                let valA = a[colIndex];
+                let valB = b[colIndex];
+                
+                // Numeric Sort (Size or Date timestamp)
+                if (colIndex === 1 || colIndex === 2) {
+                    valA = Number(valA) || 0;
+                    valB = Number(valB) || 0;
+                    return dir === 'asc' ? valA - valB : valB - valA;
+                }
+                
+                // String sort
+                valA = String(valA || '');
+                valB = String(valB || '');
+                return dir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+            });
+        }
+        
+        currentGridData = processed;
+        gridInstance.updateConfig({
+            data: processed
+        }).forceRender();
+    }
+
     function applyColumnFilter() {
         const menu = document.getElementById('grid-filter-menu');
         if (!menu || currentFilterColIndex === null) return;
@@ -287,59 +336,62 @@
         }
 
         menu.classList.add('hidden');
-
-        // Apply to Grid (Cumulative filtering across all columns)
-        if (!gridInstance) return;
-        
-        let filtered = originalGridData;
-        
-        // Loop through each column's filters
-        for (let col = 0; col < 6; col++) {
-            if (activeFilters[col] && activeFilters[col].length > 0) {
-                filtered = filtered.filter(row => {
-                    const rowVal = getFormattedColumnValue(row, col);
-                    return activeFilters[col].includes(rowVal);
-                });
-            }
-        }
-
-        gridInstance.updateConfig({
-            data: filtered
-        }).forceRender();
+        applyFiltersAndSort();
     }
 
     function sortGridByColumn(colIndex, direction) {
         const menu = document.getElementById('grid-filter-menu');
         if (menu) menu.classList.add('hidden');
         
+        currentSort = { colIndex: colIndex, direction: direction };
+        applyFiltersAndSort();
+    }
+
+    function downloadCsv() {
         if (!gridInstance) return;
 
-        let dataToSort = [...gridInstance.config.data]; // Sort current filtered view
-        
-        dataToSort.sort((a, b) => {
-            let valA = a[colIndex];
-            let valB = b[colIndex];
-            
-            // Numeric Sort (Size or Date timestamp)
-            if (colIndex === 1 || colIndex === 2) {
-                valA = Number(valA) || 0;
-                valB = Number(valB) || 0;
-                return direction === 'asc' ? valA - valB : valB - valA;
-            }
-            
-            // String sort (Name or Type)
-            valA = String(valA || '');
-            valB = String(valB || '');
-            if (direction === 'asc') {
-                return valA.localeCompare(valB);
-            } else {
-                return valB.localeCompare(valA);
-            }
+        // Get currently filtered and sorted data
+        const data = currentGridData;
+        if (!data || data.length === 0) {
+            FileFlow.ui.Status.error("No data to export");
+            return;
+        }
+
+        // Define headers matching grid columns
+        const headers = ['Name', 'Size (Bytes)', 'Date (Timestamp)', 'Type', 'Encode', 'EOL'];
+
+        // Convert data to CSV format
+        let csvContent = headers.join(',') + '\n';
+
+        data.forEach(row => {
+            const csvRow = row.map(cell => {
+                // Escape double quotes and wrap in double quotes if there's a comma
+                let str = String(cell || '');
+                if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                    str = '"' + str.replace(/"/g, '""') + '"';
+                }
+                return str;
+            });
+            csvContent += csvRow.join(',') + '\n';
         });
 
-        gridInstance.updateConfig({
-            data: dataToSort
-        }).forceRender();
+        // Add BOM for Excel UTF-8 support
+        const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+        const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        
+        let filename = 'file_flow_export.csv';
+        if (FileFlow.state.currentRootEntries.length === 1) {
+            filename = FileFlow.state.currentRootEntries[0].name + '_export.csv';
+        }
+
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
 
     async function renderFlatList(matcher) {
@@ -383,43 +435,60 @@
         // Prepare Data for Grid.js
         const gridData = [];
         const showFull = FileFlow.state.appSettings.showFullPath;
+        
+        // Process in chunks to unblock UI thread
+        const CHUNK_SIZE = 1000;
+        for (let i = 0; i < fileEntries.length; i += CHUNK_SIZE) {
+            const chunk = fileEntries.slice(i, i + CHUNK_SIZE);
+            
+            await Promise.all(chunk.map(async (item) => {
+                let size = 0;
+                let date = null;
+                let type = item.handle.name.split('.').pop();
+                let encoding = '-';
+                let eol = '-';
+                if (type === item.handle.name) type = ''; // No extension
 
-        await Promise.all(fileEntries.map(async (item) => {
-            let size = 0;
-            let date = null;
-            let type = item.handle.name.split('.').pop();
-            let encoding = '-';
-            let eol = '-';
-            if (type === item.handle.name) type = ''; // No extension
+                try {
+                    const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
+                    size = file.size;
+                    date = file.lastModified;
+                    
+                    const detectInfo = await FileFlow.utils.Detect.detectFileInfo(file);
+                    encoding = detectInfo.encoding;
+                    eol = detectInfo.eol;
+                    
+                } catch (e) { /* ignore single file errors to continue */ }
 
-            try {
-                const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
-                size = file.size;
-                date = file.lastModified;
-                
-                const detectInfo = await FileFlow.utils.Detect.detectFileInfo(file);
-                encoding = detectInfo.encoding;
-                eol = detectInfo.eol;
-                
-            } catch (e) { console.warn("Metadata read error", e); }
+                gridData.push([
+                    showFull ? item.path : item.handle.name,
+                    size,
+                    date,
+                    type,
+                    encoding,
+                    eol
+                ]);
+            }));
+            
+            // Re-calc spinner / Update Status optionally, but more importantly yield to main thread
+            FileFlow.ui.Status.show(`Processing files... (${Math.min(i + CHUNK_SIZE, fileEntries.length)} / ${fileEntries.length})`, true);
+            await new Promise(r => setTimeout(r, 0)); // Yield to UI
+        }
 
-            gridData.push([
-                showFull ? item.path : item.handle.name,
-                size,
-                date,
-                type,
-                encoding,
-                eol
-            ]);
-        }));
 
         // Store Original Data for Filtering
         originalGridData = gridData;
+        currentGridData = gridData;
+        activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
+        currentSort = { colIndex: null, direction: 'asc' };
 
         if (gridInstance) {
             // Grid.js cleanup if needed
         }
 
+        FileFlow.ui.Status.show(`Finalizing UI...`, true);
+        await new Promise(r => setTimeout(r, 0)); // Yield to UI
+        
         const gridWrapper = document.createElement('div');
         gridWrapper.style.height = '100%';
         list.appendChild(gridWrapper);
@@ -481,8 +550,8 @@
                 }
             ],
             data: gridData,
-            search: true,
-            sort: true,
+            search: false, // Turned off internal search to prevent crashing
+            sort: false, // Turned off internal sort pipeline for performance
             resizable: true,
             pagination: { limit: 500 },
             fixedHeader: true,
@@ -563,22 +632,31 @@
         sortGridByColumn: sortGridByColumn,
         filterCheckboxes: filterCheckboxes,
         toggleAllCheckboxes: toggleAllCheckboxes,
-        applyColumnFilter: applyColumnFilter
+        applyColumnFilter: applyColumnFilter,
+        downloadCsv: downloadCsv
     };
 
     // FIX: Renamed from Toast to Status to match main.js usage
+    let hideTimeout = null;
     FileFlow.ui.Status = {
-        show: showStatus,
+        show: (message, isLoading = false) => {
+            if (hideTimeout) clearTimeout(hideTimeout);
+            showStatus(message, isLoading);
+        },
         hide: (delay = 0) => {
+            if (hideTimeout) clearTimeout(hideTimeout);
             if (statusToast) {
                 if (delay > 0) {
-                    setTimeout(() => statusToast.classList.add('hidden'), delay);
+                    hideTimeout = setTimeout(() => statusToast.classList.add('hidden'), delay);
                 } else {
                     statusToast.classList.add('hidden');
                 }
             }
         },
-        error: (message) => showStatus(`Error: ${message}`, false)
+        error: (message) => {
+            if (hideTimeout) clearTimeout(hideTimeout);
+            showStatus(`Error: ${message}`, false);
+        }
     };
 
     FileFlow.ui.ElementFactory = {
