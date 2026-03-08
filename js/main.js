@@ -216,6 +216,10 @@
                 { excludeDots: State.appSettings.excludeDots }
             );
 
+            if (State.appSettings.viewMode === 'list') {
+                Render.renderFileList();
+            }
+
             Status.hide();
         });
 

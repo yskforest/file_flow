@@ -38,6 +38,7 @@
 
         const itemDiv = document.createElement('div');
         itemDiv.className = 'item';
+        itemDiv.entry = entry; // Expose entry for ActionManager in main.js
 
         // Icon
         const icon = document.createElement('i');
@@ -74,10 +75,14 @@
             li.entry = entry; // Attach entry for lazy loading
         } else {
             itemDiv.classList.add('file-item');
-            itemDiv.addEventListener('click', (e) => {
+            itemDiv.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 // Select file action
-                FileFlow.actions.execute(entry);
+                const mode = FileFlow.state.appSettings.actionMode;
+                const action = FileFlow.actions.ActionManager.getAction(mode === 'detect' ? 'detect' : '.' + mode);
+                if (action && action.shouldApply(entry, entry.name)) {
+                    await action.execute(itemDiv, entry);
+                }
             });
         }
 
@@ -474,23 +479,50 @@
                 let size = 0;
                 let date = null;
                 let type = item.handle.name.split('.').pop();
+                if (type === item.handle.name) type = ''; // No extension
                 let encoding = '-';
                 let eol = '-';
-                if (type === item.handle.name) type = ''; // No extension
 
-                try {
-                    const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
-                    size = file.size;
-                    date = file.lastModified;
-                    
-                    const detectInfo = await FileFlow.utils.Detect.detectFileInfo(file);
-                    encoding = detectInfo.encoding;
-                    eol = detectInfo.eol;
-                    
-                } catch (e) { /* ignore single file errors to continue */ }
+                const pathKey = item.handle.fullPath || item.path;
+                let meta = FileFlow.state.entryMetadata[pathKey];
+
+                if (meta && meta.size !== undefined) {
+                    // Use cached metadata to prevent re-reading massive numbers of files from disk
+                    size = meta.size;
+                    date = meta.date;
+                    encoding = meta.encoding || '-';
+                    eol = meta.eol || '-';
+                } else {
+                    try {
+                        const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
+                        size = file.size;
+                        date = file.lastModified;
+                        
+                        const detectInfo = await FileFlow.utils.Detect.detectFileInfo(file);
+                        encoding = detectInfo.encoding;
+                        eol = detectInfo.eol;
+
+                        // Cache it
+                        if (!FileFlow.state.entryMetadata[pathKey]) {
+                            FileFlow.state.entryMetadata[pathKey] = {};
+                        }
+                        FileFlow.state.entryMetadata[pathKey].size = size;
+                        FileFlow.state.entryMetadata[pathKey].date = date;
+                        FileFlow.state.entryMetadata[pathKey].encoding = encoding;
+                        FileFlow.state.entryMetadata[pathKey].eol = eol;
+                        
+                    } catch (e) { /* ignore single file errors to continue */ }
+                }
+
+                // Determine displayed name vs potentially renamed name
+                let displayName = item.handle.name;
+                meta = FileFlow.state.entryMetadata[pathKey]; // Re-fetch in case we just created it
+                if (meta && meta.newFilename) {
+                    displayName = meta.newFilename;
+                }
 
                 gridData.push([
-                    showFull ? item.path : item.handle.name,
+                    showFull ? item.path : displayName,
                     size,
                     date,
                     type,
