@@ -82,13 +82,12 @@ main {
     background-color: var(--drop-zone-bg);
     border: 2px dashed var(--border-color);
     border-radius: 1rem;
-    height: 200px;
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: all 0.3s ease;
     cursor: pointer;
-    flex-shrink: 0;
 }
 
 .drop-zone.drag-over {
