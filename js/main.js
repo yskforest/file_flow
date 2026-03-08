@@ -262,6 +262,17 @@
         });
         closeStatsBtn.addEventListener('click', () => statsModal.classList.add('hidden'));
 
+        // Close all modals when clicking outside the content area
+        [settingsModal, statsModal].forEach(modal => {
+            if (modal) {
+                modal.addEventListener('click', (e) => {
+                    if (e.target === modal) {
+                        modal.classList.add('hidden');
+                    }
+                });
+            }
+        });
+
     }
 
     async function handleEntries(entries) {
