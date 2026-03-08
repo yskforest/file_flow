@@ -377,6 +377,10 @@ main {
     flex-direction: column;
 }
 
+#stats-modal .modal-content {
+    max-width: 700px;
+}
+
 .modal-body {
     overflow-y: auto;
     padding-right: 0.5rem;
