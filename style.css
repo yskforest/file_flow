@@ -578,12 +578,16 @@ th.gridjs-th {
     background-color: var(--card-bg) !important;
     color: var(--text-secondary) !important;
     border-color: var(--border-color) !important;
-    /* Removed custom sticky positioning because Grid.js fixedHeader plugin handles it internally using position: sticky automatically */
+    border-bottom: 2px solid var(--border-color) !important;
+    position: sticky !important;
+    top: 0 !important;
     z-index: 10 !important;
+    /* Ensure the cell background cannot be seen through hover states */
+    background-clip: padding-box !important;
 }
 
 th.gridjs-th:hover {
-    background-color: rgba(255, 255, 255, 0.05) !important;
+    background-color: var(--bg-color) !important;
 }
 
 /* CELL FIX */
@@ -606,10 +610,6 @@ td.gridjs-td {
 
 /* ROW HOVER & SELECTION FIX (High Contrast Mode) */
 /* Hover & Selection - Inverted Colors for Maximum Visibility */
-tr.gridjs-tr {
-    position: relative;
-    z-index: 1;
-}
 
 tr.gridjs-tr:hover td.gridjs-td,
 tr.gridjs-tr.gridjs-tr-selected td.gridjs-td {
