@@ -141,7 +141,7 @@
     }
 
     // Custom Filter Logic for Grid.js
-    let activeFilters = { 0: [], 1: [], 2: [], 3: [] }; // Name, Size, Date, Type
+    let activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] }; // Name, Size, Date, Type, Encode, EOL
     let currentFilterColIndex = null;
 
     function getFormattedColumnValue(row, colIndex) {
@@ -294,7 +294,7 @@
         let filtered = originalGridData;
         
         // Loop through each column's filters
-        for (let col = 0; col < 4; col++) {
+        for (let col = 0; col < 6; col++) {
             if (activeFilters[col] && activeFilters[col].length > 0) {
                 filtered = filtered.filter(row => {
                     const rowVal = getFormattedColumnValue(row, col);
@@ -388,19 +388,28 @@
             let size = 0;
             let date = null;
             let type = item.handle.name.split('.').pop();
+            let encoding = '-';
+            let eol = '-';
             if (type === item.handle.name) type = ''; // No extension
 
             try {
                 const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
                 size = file.size;
                 date = file.lastModified;
+                
+                const detectInfo = await FileFlow.utils.Detect.detectFileInfo(file);
+                encoding = detectInfo.encoding;
+                eol = detectInfo.eol;
+                
             } catch (e) { console.warn("Metadata read error", e); }
 
             gridData.push([
                 showFull ? item.path : item.handle.name,
                 size,
                 date,
-                type
+                type,
+                encoding,
+                eol
             ]);
         }));
 
@@ -455,8 +464,20 @@
                 {
                     name: gridjs.html(createHeaderHTML('Type', 3)),
                     id: 'Type',
-                    width: '100px',
+                    width: '90px',
                     sort: false // Disable sort on header click for this column
+                },
+                {
+                    name: gridjs.html(createHeaderHTML('Encode', 4)),
+                    id: 'Encode',
+                    width: '120px',
+                    sort: false
+                },
+                {
+                    name: gridjs.html(createHeaderHTML('EOL', 5)),
+                    id: 'EOL',
+                    width: '90px',
+                    sort: false
                 }
             ],
             data: gridData,

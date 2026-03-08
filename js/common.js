@@ -109,6 +109,131 @@ window.FileFlow = {
     };
 })();
 
+// Detect Utility
+(function() {
+    async function detectFileInfo(file) {
+        let encoding = '-';
+        let eol = '-';
+
+        // Read up to 4KB for detection
+        const slice = file.slice(0, 4096);
+        const buffer = await slice.arrayBuffer();
+        const view = new Uint8Array(buffer);
+
+        // Check for binary
+        let isBinary = false;
+        for (let i = 0; i < Math.min(view.length, 512); i++) {
+            if (view[i] === 0) {
+                isBinary = true;
+                break;
+            }
+        }
+
+        if (isBinary) {
+            encoding = 'Binary';
+            eol = '-';
+            return { encoding, eol, isBinary };
+        }
+
+        if (view.length === 0) {
+            return { encoding: 'Empty', eol: 'None', isBinary: false };
+        }
+
+        // 1. EOL Detection
+        let cr = 0, lf = 0, crlf = 0;
+        for (let j = 0; j < view.length; j++) {
+            if (view[j] === 0x0D) {
+                if (j + 1 < view.length && view[j + 1] === 0x0A) {
+                    crlf++;
+                    j++; 
+                } else {
+                    cr++;
+                }
+            } else if (view[j] === 0x0A) { 
+                lf++;
+            }
+        }
+
+        if (crlf > lf && crlf > cr) eol = 'CRLF';
+        else if (lf > crlf && lf > cr) eol = 'LF';
+        else if (cr > crlf && cr > lf) eol = 'CR';
+        else if (crlf === 0 && lf === 0 && cr === 0) eol = 'None';
+        else eol = 'Mixed';
+
+        // 2. Encoding Detection (Heuristic)
+        if (view.length >= 3 && view[0] === 0xEF && view[1] === 0xBB && view[2] === 0xBF) {
+            encoding = 'UTF-8 (BOM)';
+        } else if (view.length >= 2 && view[0] === 0xFE && view[1] === 0xFF) {
+            encoding = 'UTF-16 BE';
+        } else if (view.length >= 2 && view[0] === 0xFF && view[1] === 0xFE) {
+            encoding = 'UTF-16 LE';
+        } else {
+            let isAscii = true;
+            for (let j = 0; j < view.length; j++) {
+                if (view[j] > 0x7F) {
+                    isAscii = false;
+                    break;
+                }
+            }
+
+            if (isAscii) {
+                encoding = 'ASCII'; 
+            } else {
+                let isUtf8 = true;
+                try {
+                    new TextDecoder('utf-8', { fatal: true }).decode(view);
+                } catch (e) {
+                    isUtf8 = false;
+                }
+
+                if (isUtf8) {
+                    encoding = 'UTF-8';
+                } else {
+                    let looksLikeSJIS = false;
+                    let validSJIS = true;
+                    for (let j = 0; j < view.length; j++) {
+                        const b = view[j];
+                        if ((b >= 0x81 && b <= 0x9F) || (b >= 0xE0 && b <= 0xFC)) {
+                            looksLikeSJIS = true;
+                            if (j + 1 >= view.length) break; 
+                            const b2 = view[j + 1];
+                            if ((b2 >= 0x40 && b2 <= 0x7E) || (b2 >= 0x80 && b2 <= 0xFC)) {
+                                j++;
+                            } else {
+                                validSJIS = false;
+                                break;
+                            }
+                        } else if (b >= 0xFD) {
+                            validSJIS = false;
+                            break;
+                        }
+                    }
+
+                    if (looksLikeSJIS && validSJIS) {
+                        encoding = 'Shift_JIS';
+                    } else {
+                        let looksLikeEUC = false;
+                        for (let j = 0; j < view.length; j++) {
+                            const b = view[j];
+                            if (b >= 0xA1 && b <= 0xFE) {
+                                looksLikeEUC = true;
+                            }
+                        }
+                        if (looksLikeEUC) encoding = 'EUC-JP?';
+                        else encoding = 'Other';
+                    }
+                }
+            }
+        }
+
+        return { encoding, eol, isBinary };
+    }
+
+    FileFlow.utils.Detect = {
+        detectFileInfo: detectFileInfo
+    };
+})();
+
 // Zip Utility
 (function () {
 
