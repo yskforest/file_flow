@@ -435,28 +435,27 @@
                 {
                     name: gridjs.html(createHeaderHTML('Name', 0)),
                     id: 'Name',
-                    width: '50%',
                     formatter: (cell) => gridjs.html(`<span class="grid-filename" title="${cell}">${cell}</span>`),
                     sort: false // Handled by custom filter popover
                 },
                 {
                     name: gridjs.html(createHeaderHTML('Size', 1)),
                     id: 'Size',
-                    width: '15%',
+                    width: '120px',
                     formatter: (cell) => formatBytes(cell),
                     sort: false // Handled by custom filter popover
                 },
                 {
                     name: gridjs.html(createHeaderHTML('Date', 2)),
                     id: 'Date',
-                    width: '25%',
+                    width: '180px',
                     formatter: (cell) => formatDate(cell),
                     sort: false // Handled by custom filter popover
                 },
                 {
                     name: gridjs.html(createHeaderHTML('Type', 3)),
                     id: 'Type',
-                    width: '15%',
+                    width: '100px',
                     sort: false // Disable sort on header click for this column
                 }
             ],

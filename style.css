@@ -584,6 +584,7 @@ th.gridjs-th {
     z-index: 10 !important;
     /* Ensure the cell background cannot be seen through hover states */
     background-clip: padding-box !important;
+    padding: 0.4rem 0.5rem !important; /* Match TD padding */
 }
 
 th.gridjs-th:hover {
@@ -595,10 +596,22 @@ td.gridjs-td {
     background-color: var(--bg-color) !important;
     color: var(--text-primary) !important;
     border-color: var(--border-color) !important;
-    padding: 0.6rem 1rem !important;
+    padding: 0.4rem 0.5rem !important; /* Reduced padding from 0.6rem 1rem to allow smaller columns */
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
+}
+
+/* TABLE FIX for Resizing */
+table.gridjs-table {
+    table-layout: fixed !important;
+    width: 100% !important;
+}
+
+/* Allow columns to be resized smaller than default */
+th.gridjs-th,
+td.gridjs-td {
+    min-width: 30px !important;
 }
 
 /* FOOTER FIX */
