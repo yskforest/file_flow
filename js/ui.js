@@ -609,6 +609,9 @@
                 td: 'custom-grid-td'
             }
         }).render(gridWrapper);
+        
+        // Hide 'Finalizing UI...' message
+        FileFlow.ui.Status.hide(500);
     }
 
     function shouldInclude(entry) {
