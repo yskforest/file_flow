@@ -1,736 +1,548 @@
+// FileFlow — UI Layer
 (function () {
-    const statusToast = document.getElementById('status-toast');
-    const statusText = document.getElementById('status-text');
-    const dropZone = document.getElementById('drop-zone');
-    const fileListContainer = document.getElementById('file-list-container');
+    const { $, formatBytes, formatDate, Icons, Glob, FS, Detect, downloadBlob } = FileFlow.utils;
+    const State = FileFlow.state;
 
-    let gridInstance = null;
-    let originalGridData = []; // Store full dataset locally for filtering
-    let currentGridData = []; // Store currently filtered/sorted dataset
-    
-    let activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] }; // Name, Size, Date, Type, Encode, EOL
-    let currentSort = { colIndex: null, direction: 'asc' };
-    let currentFilterColIndex = null;
+    // =====================
+    //  Status Toast
+    // =====================
 
-    function showStatus(message, isLoading = false) {
-        if (!statusToast || !statusText) return;
-        statusText.textContent = message;
-        statusToast.classList.remove('hidden');
-        const spinner = statusToast.querySelector('.spinner');
-        if (spinner) {
-            spinner.style.display = isLoading ? 'block' : 'none';
+    let hideTimeout = null;
+    const Status = {
+        show(msg, isLoading = false) {
+            clearTimeout(hideTimeout);
+            const toast = $('status-toast'), text = $('status-text');
+            if (!toast || !text) return;
+            text.textContent = msg;
+            toast.classList.remove('hidden');
+            const spinner = toast.querySelector('.spinner');
+            if (spinner) spinner.style.display = isLoading ? 'block' : 'none';
+            if (!isLoading) hideTimeout = setTimeout(() => toast.classList.add('hidden'), 3000);
+        },
+        hide(delay = 0) {
+            clearTimeout(hideTimeout);
+            const toast = $('status-toast');
+            if (!toast) return;
+            delay > 0 ? (hideTimeout = setTimeout(() => toast.classList.add('hidden'), delay)) : toast.classList.add('hidden');
+        },
+        error(msg) { Status.show(`Error: ${msg}`); }
+    };
+
+    // =====================
+    //  Modal Factory
+    // =====================
+
+    function createModal(id, title, bodyHTML) {
+        let modal = $(id);
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = id;
+            modal.className = 'modal hidden';
+            document.body.appendChild(modal);
         }
-
-        // Auto hide after 3s if not loading
-        if (!isLoading) {
-            setTimeout(() => {
-                statusToast.classList.add('hidden');
-            }, 3000);
-        }
+        modal.innerHTML = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>${title}</h3>
+                    <button class="icon-btn close-modal-btn">${Icons.close}</button>
+                </div>
+                <div class="modal-body">${bodyHTML}</div>
+            </div>`;
+        const close = () => modal.classList.add('hidden');
+        modal.querySelector('.close-modal-btn').addEventListener('click', close);
+        modal.addEventListener('click', e => { if (e.target === modal) close(); });
+        return modal;
     }
 
-    function createTreeElement(entry, matcher = null) {
+    function initModals() {
+        createModal('settings-modal', 'Settings', `
+            <div class="setting-group">
+                <h4>Action Mode</h4>
+                <label class="setting-item radio"><input type="radio" name="action-mode" value="md" checked><span>Add .md extension</span></label>
+                <label class="setting-item radio"><input type="radio" name="action-mode" value="txt"><span>Add .txt extension</span></label>
+                <label class="setting-item radio"><input type="radio" name="action-mode" value="detect"><span>Detect Info (Encoding/EOL)</span></label>
+            </div>
+            <div class="setting-group">
+                <h4>Filters &amp; Display</h4>
+                <label class="setting-item"><input type="checkbox" id="exclude-dots-checkbox" checked><span>Exclude files/folders starting with "." (dotfiles)</span></label>
+                <label class="setting-item"><input type="checkbox" id="show-fullpath-checkbox" checked><span>Show full path in List View</span></label>
+            </div>`);
+        createModal('stats-modal', 'Statistics', '<div id="stats-content"></div>');
+    }
+
+    // =====================
+    //  Tree View
+    // =====================
+
+    function shouldInclude(entry) {
+        return !(State.appSettings.excludeDots && entry.name.startsWith('.'));
+    }
+
+    function createTreeElement(entry) {
         const li = document.createElement('li');
-        // Filter logic for Tree View
-        if (matcher && !entry.isDirectory && !matcher(entry.name)) {
-            // If file and matches filter -> show. If not -> return null.
-        }
+        const div = document.createElement('div');
+        div.className = 'item';
+        div.entry = entry;
 
-        const itemDiv = document.createElement('div');
-        itemDiv.className = 'item';
-        itemDiv.entry = entry; // Expose entry for ActionManager in main.js
-
-        // Icon
         const icon = document.createElement('i');
         icon.className = entry.isDirectory ? 'fas fa-folder folder-icon' : 'far fa-file file-icon';
-        itemDiv.appendChild(icon);
+        div.appendChild(icon);
 
-        // Name
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'file-name';
-        nameSpan.textContent = entry.name;
-        itemDiv.appendChild(nameSpan);
-
-        li.appendChild(itemDiv);
+        const name = document.createElement('span');
+        name.className = 'file-name';
+        name.textContent = entry.name;
+        div.appendChild(name);
+        li.appendChild(div);
 
         if (entry.isDirectory) {
-            itemDiv.classList.add('folder-toggle');
-            // Arrow
+            div.classList.add('folder-toggle');
             const arrow = document.createElement('span');
             arrow.className = 'arrow';
-            arrow.innerHTML = '&#9656;'; // Right triangle
-            itemDiv.prepend(arrow);
-
-            const childrenContainer = document.createElement('ul');
-            childrenContainer.className = 'nested';
-            li.appendChild(childrenContainer);
-
-            itemDiv.addEventListener('click', (e) => {
-                e.stopPropagation();
-                toggleFolder(itemDiv);
-            });
-
-            // Mark as loaded/unloaded
+            arrow.innerHTML = '&#9656;';
+            div.prepend(arrow);
+            const nested = document.createElement('ul');
+            nested.className = 'nested';
+            li.appendChild(nested);
             li.dataset.loaded = 'false';
-            li.entry = entry; // Attach entry for lazy loading
+            li.entry = entry;
+            div.addEventListener('click', e => { e.stopPropagation(); toggleFolder(div); });
         } else {
-            itemDiv.classList.add('file-item');
-            itemDiv.addEventListener('click', async (e) => {
+            div.classList.add('file-item');
+            div.addEventListener('click', async e => {
                 e.stopPropagation();
-                // Select file action
-                const mode = FileFlow.state.appSettings.actionMode;
+                const mode = State.appSettings.actionMode;
                 const action = FileFlow.actions.ActionManager.getAction(mode === 'detect' ? 'detect' : '.' + mode);
-                if (action && action.shouldApply(entry, entry.name)) {
-                    await action.execute(itemDiv, entry);
-                }
+                if (action && action.shouldApply(entry)) await action.execute(div, entry);
             });
         }
-
         return li;
     }
 
-    async function toggleFolder(itemDiv) {
-        const li = itemDiv.parentElement;
-        const arrow = itemDiv.querySelector('.arrow');
-        const childrenContainer = li.querySelector('.nested');
-        const entry = li.entry;
-
-        if (childrenContainer.classList.contains('expanded')) {
-            // Collapse
-            childrenContainer.classList.remove('expanded');
-            itemDiv.classList.remove('open');
+    async function toggleFolder(div) {
+        const li = div.parentElement, arrow = div.querySelector('.arrow'), nested = li.querySelector('.nested');
+        if (nested.classList.contains('expanded')) {
+            nested.classList.remove('expanded');
+            div.classList.remove('open');
             arrow.style.transform = 'rotate(0deg)';
         } else {
-            // Expand
             if (li.dataset.loaded === 'false') {
-                await loadChildren(entry, childrenContainer);
+                await loadChildren(li.entry, nested);
                 li.dataset.loaded = 'true';
             }
-            childrenContainer.classList.add('expanded');
-            itemDiv.classList.add('open');
+            nested.classList.add('expanded');
+            div.classList.add('open');
             arrow.style.transform = 'rotate(90deg)';
         }
     }
 
-    async function loadChildren(directoryEntry, container) {
-        container.innerHTML = ''; // Clear placeholders
-        const entries = await FileFlow.utils.FileSystem.readDir(directoryEntry);
-
-        // Sort: Folders first, then files
-        entries.sort((a, b) => {
-            if (a.isDirectory === b.isDirectory) {
-                return a.name.localeCompare(b.name);
-            }
-            return a.isDirectory ? -1 : 1;
-        });
-
-        const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
-
-        for (const child of entries) {
-            if (shouldInclude(child)) {
-                const el = await createTreeElement(child, matcher);
-                if (el) container.appendChild(el);
-            }
-        }
+    async function loadChildren(dirEntry, container) {
+        container.innerHTML = '';
+        const entries = await FS.readDir(dirEntry);
+        entries.sort((a, b) => a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1);
+        for (const child of entries)
+            if (shouldInclude(child)) container.appendChild(createTreeElement(child));
     }
 
-    // --- Flat List (Grid.js) Logic ---
+    // =====================
+    //  Grid.js List View
+    // =====================
 
-    function formatBytes(bytes, decimals = 2) {
-        if (!+bytes) return '0 Bytes';
-        const k = 1024;
-        const dm = decimals < 0 ? 0 : decimals;
-        const sizes = ['Bytes', 'KiB', 'MiB', 'GiB', 'TiB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+    let gridInstance = null, originalGridData = [], currentGridData = [];
+    let activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
+    let currentSort = { colIndex: null, direction: 'asc' };
+    let currentFilterColIndex = null;
+
+    function getColValue(row, col) {
+        if (col === 1) return formatBytes(row[col]);
+        if (col === 2) return formatDate(row[col]);
+        return String(row[col] || '(None)');
     }
 
-    function formatDate(date) {
-        if (!date) return '-';
-        return new Date(date).toLocaleString();
-    }
+    // --- Filter Popover ---
 
-    function getFormattedColumnValue(row, colIndex) {
-        // Now row is strictly a raw Array [v1, v2, ...]
-        const val = row[colIndex];
-        
-        if (colIndex === 1) return formatBytes(val);
-        if (colIndex === 2) return formatDate(val);
-        return String(val || '(None)');
-    }
-
-    function toggleFilterMenu(btnElement, colIndex, colName) {
-        let menu = document.getElementById('grid-filter-menu');
+    function toggleFilterMenu(btn, colIndex, colName) {
+        let menu = $('grid-filter-menu');
         if (!menu) {
             menu = document.createElement('div');
             menu.id = 'grid-filter-menu';
             menu.className = 'filter-popover hidden';
             document.body.appendChild(menu);
-
-            // Close on click outside
-            document.addEventListener('click', (e) => {
-                if (!menu.contains(e.target) && !e.target.closest('.filter-icon-btn')) {
+            document.addEventListener('click', e => {
+                if (!menu.contains(e.target) && !e.target.closest('.filter-icon-btn'))
                     menu.classList.add('hidden');
-                }
             });
         }
 
-        // If clicking the same open menu, close it
         if (!menu.classList.contains('hidden') && currentFilterColIndex === colIndex) {
             menu.classList.add('hidden');
             return;
         }
-
         currentFilterColIndex = colIndex;
 
-        // Build a dataset filtered by ALL OTHER active column filters, ignoring THIS column's filter.
-        let baseDataForMenu = [...originalGridData];
+        // Build dataset filtered by OTHER columns
+        let base = [...originalGridData];
         for (let c = 0; c < 6; c++) {
-            if (c !== colIndex && activeFilters[c] && activeFilters[c].length > 0) {
-                baseDataForMenu = baseDataForMenu.filter(row => {
-                    const rowVal = getFormattedColumnValue(row, c);
-                    return activeFilters[c].includes(String(rowVal));
-                });
-            }
+            if (c !== colIndex && activeFilters[c]?.length)
+                base = base.filter(row => activeFilters[c].includes(getColValue(row, c)));
         }
 
-        // Get unique values from this filtered base data for the current column
-        const uniqueValues = [...new Set(baseDataForMenu.map(r => getFormattedColumnValue(r, colIndex)))];
-        
-        // Sort the unique values depending on column type
-        uniqueValues.sort((a,b) => {
-            if(a === '(None)') return 1;
-            if(b === '(None)') return -1;
-            // For Size/Date filters we sort alphabetically by the formatted string for the checkbox list, 
-            // the actual Grid sorting will be type-aware.
-            return String(a).localeCompare(String(b)); 
-        });
+        const unique = [...new Set(base.map(r => getColValue(r, colIndex)))].sort((a, b) =>
+            a === '(None)' ? 1 : b === '(None)' ? -1 : String(a).localeCompare(String(b)));
 
-        // Current active filters for this column (if empty, assume all selected)
-        const activeColFilters = activeFilters[colIndex];
-        const isAllSelected = activeColFilters.length === 0 || activeColFilters.length === uniqueValues.length;
+        const active = activeFilters[colIndex];
+        const allSelected = !active.length || active.length === unique.length;
 
-        // Build HTML
-        let html = `
+        const checkboxes = unique.map(val =>
+            `<label class="filter-checkbox-item">
+                <input type="checkbox" value="${val}" ${allSelected || active.includes(val) ? 'checked' : ''}>
+                <span class="type-label" title="${val}">${val}</span>
+            </label>`).join('');
+
+        menu.innerHTML = `
             <div class="filter-actions">
-                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex}, 'asc')" class="text-btn outline">Sort Ascending</button>
-                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex}, 'desc')" class="text-btn outline">Sort Descending</button>
+                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex},'asc')" class="text-btn outline">Sort Ascending</button>
+                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex},'desc')" class="text-btn outline">Sort Descending</button>
             </div>
             <hr class="filter-divider">
             <div class="filter-search-container">
                 <input type="text" id="grid-filter-search" class="search-input full-width" placeholder="Search ${colName}..." onkeyup="FileFlow.ui.Render.filterCheckboxes(this.value)">
             </div>
             <div class="filter-bulk-actions">
-                <a href="#" onclick="event.preventDefault(); FileFlow.ui.Render.toggleAllCheckboxes(true)">Select All</a> - 
-                <a href="#" onclick="event.preventDefault(); FileFlow.ui.Render.toggleAllCheckboxes(false)">Clear</a>
+                <a href="#" onclick="event.preventDefault();FileFlow.ui.Render.toggleAllCheckboxes(true)">Select All</a> -
+                <a href="#" onclick="event.preventDefault();FileFlow.ui.Render.toggleAllCheckboxes(false)">Clear</a>
             </div>
-            <div class="filter-options-list" id="grid-checkbox-list">
-        `;
-
-        uniqueValues.forEach(val => {
-            const isChecked = isAllSelected || activeColFilters.includes(val) ? 'checked' : '';
-            html += `
-                <label class="filter-checkbox-item">
-                    <input type="checkbox" value="${val}" ${isChecked}>
-                    <span class="type-label" title="${val}">${val}</span>
-                </label>
-            `;
-        });
-
-        html += `
-            </div>
+            <div class="filter-options-list" id="grid-checkbox-list">${checkboxes}</div>
             <div class="filter-footer">
                 <button onclick="document.getElementById('grid-filter-menu').classList.add('hidden')" class="text-btn outline">Cancel</button>
                 <button onclick="FileFlow.ui.Render.applyColumnFilter()" class="text-btn">Apply</button>
-            </div>
-        `;
+            </div>`;
 
-        menu.innerHTML = html;
-
-        // Position menu relative to the button
-        const rect = btnElement.getBoundingClientRect();
+        const rect = btn.getBoundingClientRect();
         menu.style.top = (rect.bottom + window.scrollY + 8) + 'px';
-        menu.style.left = (rect.left + window.scrollX - 200 + rect.width) + 'px'; // Align right edge approximately
-
+        menu.style.left = (rect.left + window.scrollX - 200 + rect.width) + 'px';
         menu.classList.remove('hidden');
-        
-        // Focus search
-        setTimeout(() => {
-            const searchInput = document.getElementById('grid-filter-search');
-            if (searchInput) searchInput.focus();
-        }, 50);
+
+        setTimeout(() => { const s = $('grid-filter-search'); if (s) s.focus(); }, 50);
     }
 
     function toggleAllCheckboxes(check) {
-        const list = document.getElementById('grid-checkbox-list');
-        if (!list) return;
-        const checkboxes = list.querySelectorAll('input[type="checkbox"]');
-        checkboxes.forEach(cb => {
-            if (cb.parentElement.style.display !== 'none') {
-                cb.checked = check;
-            }
+        const list = $('grid-checkbox-list');
+        if (list) list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            if (cb.parentElement.style.display !== 'none') cb.checked = check;
         });
     }
 
     function filterCheckboxes(query) {
-        const list = document.getElementById('grid-checkbox-list');
+        const list = $('grid-checkbox-list');
         if (!list) return;
-        const labels = list.querySelectorAll('.filter-checkbox-item');
-        const lowerQuery = query.toLowerCase();
-        labels.forEach(label => {
-            const text = label.querySelector('.type-label').textContent.toLowerCase();
-            if (text.includes(lowerQuery)) {
-                label.style.display = 'flex';
-            } else {
-                label.style.display = 'none';
-            }
+        const q = query.toLowerCase();
+        list.querySelectorAll('.filter-checkbox-item').forEach(label => {
+            label.style.display = label.querySelector('.type-label').textContent.toLowerCase().includes(q) ? 'flex' : 'none';
         });
     }
 
     function applyFiltersAndSort() {
         if (!gridInstance) return;
-        
-        let processed = [...originalGridData];
-        
-        // 1. Filter
-        for (let col = 0; col < 6; col++) {
-            if (activeFilters[col] && activeFilters[col].length > 0) {
-                processed = processed.filter(row => {
-                    const rowVal = getFormattedColumnValue(row, col);
-                    // Match the stored string values
-                    return activeFilters[col].includes(String(rowVal));
-                });
-            }
+        let data = [...originalGridData];
+
+        // Filter
+        for (let c = 0; c < 6; c++) {
+            if (activeFilters[c]?.length)
+                data = data.filter(row => activeFilters[c].includes(getColValue(row, c)));
         }
-        
-        // 2. Sort
+
+        // Sort
         if (currentSort.colIndex !== null) {
-            const colIndex = currentSort.colIndex;
-            const dir = currentSort.direction;
-            
-            processed.sort((a, b) => {
-                let valA = a[colIndex];
-                let valB = b[colIndex];
-                
-                // Numeric Sort (Size or Date timestamp)
-                if (colIndex === 1 || colIndex === 2) {
-                    valA = Number(valA) || 0;
-                    valB = Number(valB) || 0;
-                    return dir === 'asc' ? valA - valB : valB - valA;
-                }
-                
-                // String sort
-                valA = String(valA || '');
-                valB = String(valB || '');
-                return dir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+            const col = currentSort.colIndex, dir = currentSort.direction;
+            data.sort((a, b) => {
+                let va = a[col], vb = b[col];
+                if (col === 1 || col === 2) { va = Number(va) || 0; vb = Number(vb) || 0; return dir === 'asc' ? va - vb : vb - va; }
+                va = String(va || ''); vb = String(vb || '');
+                return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
             });
         }
-        
-        currentGridData = processed;
-        gridInstance.updateConfig({
-            data: processed
-        }).forceRender();
 
-        // Update Filter Icons UI
+        currentGridData = data;
+        gridInstance.updateConfig({ data }).forceRender();
+
+        // Update filter icon states
         setTimeout(() => {
-            const buttons = document.querySelectorAll('.filter-icon-btn');
-            for (let c = 0; c < 6; c++) {
-                if (buttons[c]) {
-                    if (activeFilters[c] && activeFilters[c].length > 0) {
-                        buttons[c].classList.add('active');
-                        buttons[c].style.color = 'var(--accent-color)';
-                        buttons[c].style.backgroundColor = 'rgba(var(--accent-color-rgb), 0.1)';
-                    } else {
-                        buttons[c].classList.remove('active');
-                        buttons[c].style.color = '';
-                        buttons[c].style.backgroundColor = '';
-                    }
-                }
-            }
-        }, 50); // slight delay to ensure Grid.js finished rendering headers
+            document.querySelectorAll('.filter-icon-btn').forEach((btn, c) => {
+                const isActive = activeFilters[c]?.length > 0;
+                btn.classList.toggle('active', isActive);
+                btn.style.color = isActive ? 'var(--accent-color)' : '';
+                btn.style.backgroundColor = isActive ? 'rgba(var(--accent-color-rgb), 0.1)' : '';
+            });
+        }, 50);
     }
 
     function applyColumnFilter() {
-        const menu = document.getElementById('grid-filter-menu');
+        const menu = $('grid-filter-menu');
         if (!menu || currentFilterColIndex === null) return;
-        
-        const checkboxes = menu.querySelectorAll('input[type="checkbox"]');
-        const selected = [];
-        let allCount = 0;
-        checkboxes.forEach(cb => {
-            allCount++;
-            if (cb.checked) selected.push(cb.value);
-        });
-
-        // If all are selected, we can just clear the active filter for this column
-        if (selected.length === allCount || selected.length === 0) {
-            activeFilters[currentFilterColIndex] = [];
-        } else {
-            activeFilters[currentFilterColIndex] = selected;
-        }
-
+        const cbs = menu.querySelectorAll('input[type="checkbox"]');
+        const selected = [...cbs].filter(cb => cb.checked).map(cb => cb.value);
+        activeFilters[currentFilterColIndex] = selected.length === cbs.length || !selected.length ? [] : selected;
         menu.classList.add('hidden');
         applyFiltersAndSort();
     }
 
     function sortGridByColumn(colIndex, direction) {
-        const menu = document.getElementById('grid-filter-menu');
+        const menu = $('grid-filter-menu');
         if (menu) menu.classList.add('hidden');
-        
-        currentSort = { colIndex: colIndex, direction: direction };
+        currentSort = { colIndex, direction };
         applyFiltersAndSort();
     }
 
+    // --- CSV Export ---
+
     function downloadCsv() {
-        if (!gridInstance) return;
-
-        // Get currently filtered and sorted data
-        const data = currentGridData;
-        if (!data || data.length === 0) {
-            FileFlow.ui.Status.error("No data to export");
-            return;
-        }
-
-        // Define headers matching grid columns
+        if (!gridInstance || !currentGridData.length) { Status.error('No data to export'); return; }
         const headers = ['Name', 'Size (Bytes)', 'Date (Timestamp)', 'Type', 'Encode', 'EOL'];
-
-        // Convert data to CSV format
-        let csvContent = headers.join(',') + '\n';
-
-        data.forEach(row => {
-            const csvRow = row.map(cell => {
-                // Escape double quotes and wrap in double quotes if there's a comma
-                let str = String(cell || '');
-                if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-                    str = '"' + str.replace(/"/g, '""') + '"';
-                }
-                return str;
-            });
-            csvContent += csvRow.join(',') + '\n';
-        });
-
-        // Add BOM for Excel UTF-8 support
-        const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
-        const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        
-        let filename = 'file_flow_export.csv';
-        if (FileFlow.state.currentRootEntries.length === 1) {
-            filename = FileFlow.state.currentRootEntries[0].name + '_export.csv';
-        }
-
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+        const csv = [headers.join(','), ...currentGridData.map(row => row.map(escape).join(','))].join('\n') + '\n';
+        const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csv], { type: 'text/csv;charset=utf-8;' });
+        const name = State.currentRootEntries.length === 1 ? State.currentRootEntries[0].name + '_export.csv' : 'file_flow_export.csv';
+        downloadBlob(blob, name);
     }
 
-    async function renderFlatList(matcher) {
-        const list = document.getElementById('file-list');
-        if (!list) return;
+    // --- Render Flat List (Grid.js) ---
 
+    async function renderFlatList(matcher) {
+        const list = $('file-list');
+        if (!list) return;
         list.innerHTML = '';
         list.classList.remove('file-tree');
         list.classList.add('file-grid');
 
+        const roots = State.currentRootEntries;
+        const isSingleRoot = roots.length === 1 && roots[0].isDirectory;
         const fileEntries = [];
-        const rootEntries = FileFlow.state.currentRootEntries;
-        const isSingleRootFolder = rootEntries.length === 1 && rootEntries[0].isDirectory;
 
-        // Recursive collector with virtual path building
-        async function traverseWithPaths(entries, currentPath = '', depth = 0) {
+        // Collect all files with paths
+        async function collect(entries, path = '', depth = 0) {
             for (const entry of entries) {
                 if (!shouldInclude(entry)) continue;
-
-                // Build relative path string
-                let entryPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
-
-                // Exclude root folder name if single folder drop
-                if (isSingleRootFolder && depth === 0) {
-                    entryPath = ''; 
-                }
-
+                let p = path ? `${path}/${entry.name}` : entry.name;
+                if (isSingleRoot && depth === 0) p = '';
                 if (entry.isDirectory) {
-                    const children = await FileFlow.utils.FileSystem.readDir(entry);
-                    await traverseWithPaths(children, entryPath, depth + 1);
+                    await collect(await FS.readDir(entry), p, depth + 1);
                 } else {
-                    // Check filter
-                    if (matcher && !matcher(entry.name)) continue;
-                    fileEntries.push({ handle: entry, path: entryPath });
+                    if (!matcher || matcher(entry.name)) fileEntries.push({ handle: entry, path: p });
                 }
             }
         }
+        await collect(roots, '', 0);
 
-        await traverseWithPaths(rootEntries, '', 0);
+        // Build grid data in chunks
+        const gridData = [], CHUNK = 1000, showFull = State.appSettings.showFullPath;
 
-        // Prepare Data for Grid.js
-        const gridData = [];
-        const showFull = FileFlow.state.appSettings.showFullPath;
-        
-        // Process in chunks to unblock UI thread
-        const CHUNK_SIZE = 1000;
-        for (let i = 0; i < fileEntries.length; i += CHUNK_SIZE) {
-            const chunk = fileEntries.slice(i, i + CHUNK_SIZE);
-            
-            await Promise.all(chunk.map(async (item) => {
-                let size = 0;
-                let date = null;
-                let type = item.handle.name.split('.').pop();
-                if (type === item.handle.name) type = ''; // No extension
-                let encoding = '-';
-                let eol = '-';
-
+        for (let i = 0; i < fileEntries.length; i += CHUNK) {
+            const chunk = fileEntries.slice(i, i + CHUNK);
+            await Promise.all(chunk.map(async item => {
                 const pathKey = item.handle.fullPath || item.path;
-                let meta = FileFlow.state.entryMetadata[pathKey];
+                let meta = State.entryMetadata[pathKey];
+                let size = 0, date = null, encoding = '-', eol = '-';
+                const type = item.handle.name.includes('.') ? item.handle.name.split('.').pop().toLowerCase() : '';
 
-                if (meta && meta.size !== undefined) {
-                    // Use cached metadata to prevent re-reading massive numbers of files from disk
-                    size = meta.size;
-                    date = meta.date;
-                    encoding = meta.encoding || '-';
-                    eol = meta.eol || '-';
+                if (meta?.size !== undefined) {
+                    ({ size, date, encoding = '-', eol = '-' } = meta);
                 } else {
                     try {
-                        const file = await new Promise((resolve, reject) => item.handle.file(resolve, reject));
-                        size = file.size;
-                        date = file.lastModified;
-                        
-                        const detectInfo = await FileFlow.utils.Detect.detectFileInfo(file);
-                        encoding = detectInfo.encoding;
-                        eol = detectInfo.eol;
-
-                        // Cache it
-                        if (!FileFlow.state.entryMetadata[pathKey]) {
-                            FileFlow.state.entryMetadata[pathKey] = {};
-                        }
-                        FileFlow.state.entryMetadata[pathKey].size = size;
-                        FileFlow.state.entryMetadata[pathKey].date = date;
-                        FileFlow.state.entryMetadata[pathKey].encoding = encoding;
-                        FileFlow.state.entryMetadata[pathKey].eol = eol;
-                        
-                    } catch (e) { /* ignore single file errors to continue */ }
+                        const file = await new Promise((res, rej) => item.handle.file(res, rej));
+                        size = file.size; date = file.lastModified;
+                        const info = await Detect.detectFileInfo(file);
+                        encoding = info.encoding; eol = info.eol;
+                        State.entryMetadata[pathKey] = { ...State.entryMetadata[pathKey], size, date, encoding, eol };
+                    } catch { /* skip */ }
                 }
 
-                // Determine displayed name vs potentially renamed name
                 let displayName = item.handle.name;
-                meta = FileFlow.state.entryMetadata[pathKey]; // Re-fetch in case we just created it
-                if (meta && meta.newFilename) {
-                    displayName = meta.newFilename;
-                }
-
-                gridData.push([
-                    showFull ? item.path : displayName,
-                    size,
-                    date,
-                    type,
-                    encoding,
-                    eol
-                ]);
+                meta = State.entryMetadata[pathKey];
+                if (meta?.newFilename) displayName = meta.newFilename;
+                gridData.push([showFull ? item.path : displayName, size, date, type, encoding, eol]);
             }));
-            
-            // Re-calc spinner / Update Status optionally, but more importantly yield to main thread
-            FileFlow.ui.Status.show(`Processing files... (${Math.min(i + CHUNK_SIZE, fileEntries.length)} / ${fileEntries.length})`, true);
-            await new Promise(r => setTimeout(r, 0)); // Yield to UI
+
+            Status.show(`Processing files... (${Math.min(i + CHUNK, fileEntries.length)} / ${fileEntries.length})`, true);
+            await new Promise(r => setTimeout(r, 0));
         }
 
-
-        // Store Original Data for Filtering
+        // Reset grid state
         originalGridData = gridData;
         currentGridData = gridData;
         activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
         currentSort = { colIndex: null, direction: 'asc' };
 
-        if (gridInstance) {
-            // Grid.js cleanup if needed
-        }
+        Status.show('Finalizing UI...', true);
+        await new Promise(r => setTimeout(r, 0));
 
-        FileFlow.ui.Status.show(`Finalizing UI...`, true);
-        await new Promise(r => setTimeout(r, 0)); // Yield to UI
-        
-        const gridWrapper = document.createElement('div');
-        gridWrapper.style.height = '100%';
-        list.appendChild(gridWrapper);
+        const wrapper = document.createElement('div');
+        wrapper.style.height = '100%';
+        list.appendChild(wrapper);
 
-        function createHeaderHTML(colName, colIndex) {
-            // Apply immediately if already active
-            const isActive = activeFilters[colIndex] && activeFilters[colIndex].length > 0;
-            const colorStyle = isActive ? 'color: var(--accent-color); background-color: rgba(var(--accent-color-rgb, 0,122,255), 0.1);' : '';
-            const activeClass = isActive ? 'active' : '';
+        const headerHTML = (name, idx) => `
+            <div style="display:flex;align-items:center;justify-content:space-between;position:relative">
+                ${name}
+                <button class="filter-icon-btn" title="Filter / Sort by ${name}"
+                    onclick="event.stopPropagation();FileFlow.ui.Render.toggleFilterMenu(this,${idx},'${name}')">
+                    ${Icons.filter}
+                </button>
+            </div>`;
 
-            return `
-                <div style="display:flex; align-items:center; justify-content:space-between; position: relative;">
-                    ${colName}
-                    <button 
-                        class="filter-icon-btn ${activeClass}" 
-                        style="${colorStyle}"
-                        title="Filter / Sort by ${colName}"
-                        onclick="event.stopPropagation(); FileFlow.ui.Render.toggleFilterMenu(this, ${colIndex}, '${colName}')"
-                    >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
-                    </button>
-                </div>
-            `;
-        }
+        const cols = [
+            { name: 'Name', id: 'Name', formatter: c => gridjs.html(`<span class="grid-filename" title="${c}">${c}</span>`) },
+            { name: 'Size', id: 'Size', width: '120px', formatter: c => formatBytes(c) },
+            { name: 'Date', id: 'Date', width: '180px', formatter: c => formatDate(c) },
+            { name: 'Type', id: 'Type', width: '90px' },
+            { name: 'Encode', id: 'Encode', width: '120px' },
+            { name: 'EOL', id: 'EOL', width: '90px' },
+        ].map((col, i) => ({ ...col, name: gridjs.html(headerHTML(col.name, i)), sort: false }));
 
         gridInstance = new gridjs.Grid({
-            columns: [
-                {
-                    name: gridjs.html(createHeaderHTML('Name', 0)),
-                    id: 'Name',
-                    formatter: (cell) => gridjs.html(`<span class="grid-filename" title="${cell}">${cell}</span>`),
-                    sort: false // Handled by custom filter popover
-                },
-                {
-                    name: gridjs.html(createHeaderHTML('Size', 1)),
-                    id: 'Size',
-                    width: '120px',
-                    formatter: (cell) => formatBytes(cell),
-                    sort: false // Handled by custom filter popover
-                },
-                {
-                    name: gridjs.html(createHeaderHTML('Date', 2)),
-                    id: 'Date',
-                    width: '180px',
-                    formatter: (cell) => formatDate(cell),
-                    sort: false // Handled by custom filter popover
-                },
-                {
-                    name: gridjs.html(createHeaderHTML('Type', 3)),
-                    id: 'Type',
-                    width: '90px',
-                    sort: false // Disable sort on header click for this column
-                },
-                {
-                    name: gridjs.html(createHeaderHTML('Encode', 4)),
-                    id: 'Encode',
-                    width: '120px',
-                    sort: false
-                },
-                {
-                    name: gridjs.html(createHeaderHTML('EOL', 5)),
-                    id: 'EOL',
-                    width: '90px',
-                    sort: false
-                }
-            ],
+            columns: cols,
             data: gridData,
-            search: false, // Turned off internal search to prevent crashing
-            sort: false, // Turned off internal sort pipeline for performance
-            resizable: true,
+            search: false, sort: false, resizable: true,
             pagination: { limit: 500 },
-            fixedHeader: true,
-            height: '100%',
+            fixedHeader: true, height: '100%',
             style: {
-                th: {
-                    'background-color': 'var(--bg-secondary)',
-                    'color': 'var(--text-primary)',
-                    'border': '1px solid var(--border-color)'
-                },
-                td: {
-                    'background-color': 'var(--bg-primary)',
-                    'color': 'var(--text-secondary)',
-                    'border': '1px solid var(--border-color)'
-                }
+                th: { 'background-color': 'var(--bg-secondary)', 'color': 'var(--text-primary)', 'border': '1px solid var(--border-color)' },
+                td: { 'background-color': 'var(--bg-primary)', 'color': 'var(--text-secondary)', 'border': '1px solid var(--border-color)' }
             },
-            className: {
-                table: 'custom-grid-table',
-                th: 'custom-grid-th',
-                td: 'custom-grid-td'
-            }
-        }).render(gridWrapper);
-        
-        // Hide 'Finalizing UI...' message
-        FileFlow.ui.Status.hide(500);
+            className: { table: 'custom-grid-table', th: 'custom-grid-th', td: 'custom-grid-td' }
+        }).render(wrapper);
+
+        Status.hide(500);
     }
 
-    function shouldInclude(entry) {
-        if (FileFlow.state.appSettings.excludeDots && entry.name.startsWith('.')) {
-            return false;
-        }
-        return true;
-    }
+    // =====================
+    //  Main Render
+    // =====================
 
     async function renderFileList() {
-        const list = document.getElementById('file-list');
+        const list = $('file-list');
         if (!list) return;
-
         list.innerHTML = '';
+        const matcher = Glob.createMatcher(State.searchQuery);
+        const container = $('file-list-container'), dropZone = $('drop-zone');
 
-        const matcher = FileFlow.utils.Glob.createMatcher(FileFlow.state.searchQuery);
-
-        if (FileFlow.state.currentRootEntries.length > 0) {
-            if (fileListContainer) fileListContainer.classList.remove('hidden');
+        if (State.currentRootEntries.length > 0) {
+            if (container) container.classList.remove('hidden');
             if (dropZone) dropZone.classList.add('hidden');
 
-            if (FileFlow.state.appSettings.viewMode === 'tree') {
-                const shouldAutoExpand = FileFlow.state.currentRootEntries.length === 1 && FileFlow.state.currentRootEntries[0].isDirectory;
-
-                for (const entry of FileFlow.state.currentRootEntries) {
-                    if (shouldInclude(entry)) {
-                        const element = await createTreeElement(entry, matcher);
-                        if (element) {
-                            list.appendChild(element);
-                            if (!matcher && shouldAutoExpand) {
-                                const itemDiv = element.querySelector('.item.folder-toggle');
-                                if (itemDiv) await toggleFolder(itemDiv);
-                            }
-                        }
+            if (State.appSettings.viewMode === 'tree') {
+                list.classList.add('file-tree');
+                list.classList.remove('file-grid');
+                const autoExpand = State.currentRootEntries.length === 1 && State.currentRootEntries[0].isDirectory;
+                for (const entry of State.currentRootEntries) {
+                    if (!shouldInclude(entry)) continue;
+                    const el = createTreeElement(entry);
+                    list.appendChild(el);
+                    if (!matcher && autoExpand) {
+                        const toggle = el.querySelector('.item.folder-toggle');
+                        if (toggle) await toggleFolder(toggle);
                     }
                 }
             } else {
                 await renderFlatList(matcher);
             }
-
         } else {
-            if (fileListContainer) fileListContainer.classList.add('hidden');
+            if (container) container.classList.add('hidden');
             if (dropZone) dropZone.classList.remove('hidden');
         }
     }
 
-    function applyFilter() {
-        renderFileList();
+    // =====================
+    //  Statistics
+    // =====================
+
+    async function calculateStats() {
+        Status.show('Calculating statistics...', true);
+        await new Promise(r => setTimeout(r, 10));
+
+        let totalFiles = 0, totalFolders = 0, totalFileSize = 0;
+        const extCounts = {}, ignoredFolders = {};
+        const matcher = Glob.createMatcher(State.searchQuery);
+
+        await FS.traverse(State.currentRootEntries, async entry => {
+            const isMatch = !matcher || matcher(entry.name);
+
+            if (State.appSettings.excludeDots && entry.name.startsWith('.')) {
+                if (entry.isDirectory) ignoredFolders[entry.name] = (ignoredFolders[entry.name] || 0) + 1;
+                return false;
+            }
+
+            if (entry.isDirectory) {
+                if (isMatch) totalFolders++;
+            } else if (isMatch) {
+                totalFiles++;
+                const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop().toLowerCase() : 'no-ext';
+                extCounts[ext] = (extCounts[ext] || 0) + 1;
+                const meta = State.entryMetadata[entry.fullPath || entry.name];
+                if (meta?.size !== undefined) { totalFileSize += meta.size; }
+                else { try { totalFileSize += (await new Promise(r => entry.file(r))).size; } catch { /* skip */ } }
+            }
+            return true;
+        }, { excludeDots: false });
+
+        Status.hide();
+        return { totalFiles, totalFolders, extCounts, totalFileSize, ignoredFolders };
     }
 
-    // Export to Namespace
-    FileFlow.ui.Render = {
-        renderFileList: renderFileList,
-        applyFilter: applyFilter,
-        toggleFilterMenu: toggleFilterMenu,
-        sortGridByColumn: sortGridByColumn,
-        filterCheckboxes: filterCheckboxes,
-        toggleAllCheckboxes: toggleAllCheckboxes,
-        applyColumnFilter: applyColumnFilter,
-        downloadCsv: downloadCsv
-    };
+    function renderStats(stats) {
+        const totalIgnored = Object.values(stats.ignoredFolders).reduce((a, b) => a + b, 0);
+        const extRows = Object.entries(stats.extCounts).sort((a, b) => b[1] - a[1])
+            .map(([ext, n]) => `<tr><td>${ext}</td><td>${n}</td></tr>`).join('');
 
-    // FIX: Renamed from Toast to Status to match main.js usage
-    let hideTimeout = null;
-    FileFlow.ui.Status = {
-        show: (message, isLoading = false) => {
-            if (hideTimeout) clearTimeout(hideTimeout);
-            showStatus(message, isLoading);
-        },
-        hide: (delay = 0) => {
-            if (hideTimeout) clearTimeout(hideTimeout);
-            if (statusToast) {
-                if (delay > 0) {
-                    hideTimeout = setTimeout(() => statusToast.classList.add('hidden'), delay);
-                } else {
-                    statusToast.classList.add('hidden');
-                }
-            }
-        },
-        error: (message) => {
-            if (hideTimeout) clearTimeout(hideTimeout);
-            showStatus(`Error: ${message}`, false);
+        let ignoredHTML = '';
+        if (totalIgnored > 0) {
+            const rows = Object.entries(stats.ignoredFolders).sort((a, b) => b[1] - a[1])
+                .map(([name, n]) => `<tr><td>${name}</td><td>${n}</td></tr>`).join('');
+            ignoredHTML = `
+                <div style="flex:1">
+                    <h3 style="color:var(--text-muted)">Ignored Details</h3>
+                    <table class="stats-table" style="color:var(--text-muted)">
+                        <thead><tr><th>Folder Name</th><th>Count</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
+        }
+
+        $('stats-content').innerHTML = `
+            <div class="stats-summary" style="margin-bottom:20px">
+                <div class="stat-box"><div class="label">Total Size</div><div class="value">${formatBytes(stats.totalFileSize)}</div></div>
+                <div class="stat-box"><div class="label">Files</div><div class="value">${stats.totalFiles}</div></div>
+                <div class="stat-box"><div class="label">Folders</div><div class="value">${stats.totalFolders}</div></div>
+                <div class="stat-box" style="border-left:1px solid var(--border-color);padding-left:15px">
+                    <div class="label" style="color:var(--text-muted)">Ignored Folders</div>
+                    <div class="value" style="color:var(--text-muted)">${totalIgnored}</div>
+                </div>
+            </div>
+            <div style="display:flex;gap:20px;text-align:left">
+                <div style="flex:1">
+                    <h3>Extensions</h3>
+                    <table class="stats-table">
+                        <thead><tr><th>Extension</th><th>Count</th></tr></thead>
+                        <tbody>${extRows}</tbody>
+                    </table>
+                </div>
+                ${ignoredHTML}
+            </div>`;
+    }
+
+    // =====================
+    //  Export
+    // =====================
+
+    FileFlow.ui.Status = Status;
+    FileFlow.ui.initModals = initModals;
+    FileFlow.ui.Render = {
+        renderFileList, applyFilter: renderFileList,
+        toggleFilterMenu, sortGridByColumn, filterCheckboxes, toggleAllCheckboxes, applyColumnFilter,
+        downloadCsv
+    };
+    FileFlow.ui.Stats = {
+        async show() {
+            renderStats(await calculateStats());
+            $('stats-modal').classList.remove('hidden');
         }
     };
-
-    FileFlow.ui.ElementFactory = {
-        createTreeElement: createTreeElement
-    };
-
 })();
