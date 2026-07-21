@@ -143,30 +143,66 @@
 
     async function detectFileInfo(file) {
         const v = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
-
-        for (let i = 0; i < Math.min(v.length, 512); i++)
-            if (v[i] === 0) return { encoding: 'Binary', eol: '-', isBinary: true };
         if (!v.length) return { encoding: 'Empty', eol: 'None', isBinary: false };
 
-        // EOL
+        // 1. BOM チェック
+        let enc = null;
+        let isU16 = false;
+        if (v.length >= 3 && v[0] === 0xEF && v[1] === 0xBB && v[2] === 0xBF) {
+            enc = 'UTF-8 (BOM)';
+        } else if (v.length >= 2 && v[0] === 0xFE && v[1] === 0xFF) {
+            enc = 'UTF-16 BE';
+            isU16 = true;
+        } else if (v.length >= 2 && v[0] === 0xFF && v[1] === 0xFE) {
+            enc = 'UTF-16 LE';
+            isU16 = true;
+        }
+
+        // 2. バイナリ判定 (UTF-16以外)
+        if (!isU16) {
+            for (let i = 0; i < Math.min(v.length, 512); i++) {
+                if (v[i] === 0) return { encoding: 'Binary', eol: '-', isBinary: true };
+            }
+        }
+
+        // 3. EOL
         let cr = 0, lf = 0, crlf = 0;
-        for (let j = 0; j < v.length; j++) {
-            if (v[j] === 0x0D) { j + 1 < v.length && v[j + 1] === 0x0A ? (crlf++, j++) : cr++; }
-            else if (v[j] === 0x0A) lf++;
+        if (isU16) {
+            const isLE = enc === 'UTF-16 LE';
+            for (let j = 0; j < v.length - 1; j += 2) {
+                const charCode = isLE ? (v[j] | (v[j + 1] << 8)) : ((v[j] << 8) | v[j + 1]);
+                if (charCode === 0x0D) {
+                    let nextCharCode = -1;
+                    if (j + 3 < v.length) {
+                        nextCharCode = isLE ? (v[j + 2] | (v[j + 3] << 8)) : ((v[j + 2] << 8) | v[j + 3]);
+                    }
+                    if (nextCharCode === 0x0A) {
+                        crlf++;
+                        j += 2;
+                    } else {
+                        cr++;
+                    }
+                } else if (charCode === 0x0A) {
+                    lf++;
+                }
+            }
+        } else {
+            for (let j = 0; j < v.length; j++) {
+                if (v[j] === 0x0D) { j + 1 < v.length && v[j + 1] === 0x0A ? (crlf++, j++) : cr++; }
+                else if (v[j] === 0x0A) lf++;
+            }
         }
         const eol = crlf > lf && crlf > cr ? 'CRLF' : lf > crlf && lf > cr ? 'LF' :
             cr > crlf && cr > lf ? 'CR' : !crlf && !lf && !cr ? 'None' : 'Mixed';
 
-        // Encoding
-        let enc;
-        if (v.length >= 3 && v[0] === 0xEF && v[1] === 0xBB && v[2] === 0xBF) enc = 'UTF-8 (BOM)';
-        else if (v.length >= 2 && v[0] === 0xFE && v[1] === 0xFF) enc = 'UTF-16 BE';
-        else if (v.length >= 2 && v[0] === 0xFF && v[1] === 0xFE) enc = 'UTF-16 LE';
-        else if (v.every(b => b <= 0x7F)) enc = 'ASCII';
-        else {
-            let utf8 = true;
-            try { new TextDecoder('utf-8', { fatal: true }).decode(v); } catch { utf8 = false; }
-            enc = utf8 ? 'UTF-8' : detectJapanese(v);
+        // 4. Encoding (BOMがない場合)
+        if (!enc) {
+            if (v.every(b => b <= 0x7F)) enc = 'ASCII';
+            else {
+                let utf8 = true;
+                try { new TextDecoder('utf-8', { fatal: true }).decode(v); } catch { utf8 = false; }
+                enc = utf8 ? 'UTF-8' : detectJapanese(v);
+            }
         }
         return { encoding: enc, eol, isBinary: false };
     }

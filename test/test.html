@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FileFlow Test Suite</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f8fafc;
+            --text-muted: #94a3b8;
+            --border-color: #334155;
+            --primary: #a855f7;
+            --primary-hover: #c084fc;
+            --success: #10b981;
+            --success-bg: rgba(16, 185, 129, 0.15);
+            --danger: #ef4444;
+            --danger-bg: rgba(239, 68, 68, 0.15);
+            --font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1rem;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.75rem;
+            background: linear-gradient(135deg, #38bdf8, #a855f7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .summary-card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+
+        .summary-stats {
+            display: flex;
+            gap: 2rem;
+        }
+
+        .stat-box {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        .stat-passed .stat-value { color: var(--success); }
+        .stat-failed .stat-value { color: var(--danger); }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background-color: var(--border-color);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background-color: var(--primary);
+            transition: width 0.3s ease, background-color 0.3s ease;
+        }
+
+        .test-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .test-item {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .test-item:hover {
+            transform: translateY(-2px);
+            border-color: #475569;
+        }
+
+        .test-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .test-name {
+            font-weight: 500;
+            font-size: 1rem;
+        }
+
+        .test-badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.6rem;
+            border-radius: 9999px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .test-badge.pass {
+            background-color: var(--success-bg);
+            color: var(--success);
+        }
+
+        .test-badge.fail {
+            background-color: var(--danger-bg);
+            color: var(--danger);
+        }
+
+        .test-error {
+            background-color: rgba(15, 23, 42, 0.6);
+            border-left: 3px solid var(--danger);
+            padding: 0.75rem;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: #fda4af;
+            white-space: pre-wrap;
+            margin-top: 0.5rem;
+        }
+
+        button.btn-run {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.5rem 1.25rem;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        button.btn-run:hover {
+            background-color: var(--primary-hover);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>FileFlow Test Suite</h1>
+            <button id="btn-run" class="btn-run">Run Tests</button>
+        </header>
+
+        <div class="summary-card">
+            <div class="summary-stats">
+                <div class="stat-box">
+                    <span id="total-val" class="stat-value">0</span>
+                    <span class="stat-label">Total</span>
+                </div>
+                <div class="stat-box stat-passed">
+                    <span id="passed-val" class="stat-value">0</span>
+                    <span class="stat-label">Passed</span>
+                </div>
+                <div class="stat-box stat-failed">
+                    <span id="failed-val" class="stat-value">0</span>
+                    <span class="stat-label">Failed</span>
+                </div>
+            </div>
+            <div class="progress-bar-container">
+                <div id="progress" class="progress-bar"></div>
+            </div>
+        </div>
+
+        <div id="test-list" class="test-list">
+            <!-- Test results will be appended here -->
+        </div>
+    </div>
+
+    <!-- Core App Scripts -->
+    <script src="../js/utils.js"></script>
+    <script src="../js/actions.js"></script>
+    <!-- Test Case Runner -->
+    <script src="test_runner.js"></script>
+    <script>
+        const btnRun = document.getElementById('btn-run');
+        const testList = document.getElementById('test-list');
+        const totalVal = document.getElementById('total-val');
+        const passedVal = document.getElementById('passed-val');
+        const failedVal = document.getElementById('failed-val');
+        const progressBar = document.getElementById('progress');
+
+        async function executeTests() {
+            testList.innerHTML = '';
+            totalVal.textContent = '0';
+            passedVal.textContent = '0';
+            failedVal.textContent = '0';
+            progressBar.style.width = '0%';
+            progressBar.style.backgroundColor = 'var(--primary)';
+
+            let currentPassed = 0;
+            let currentFailed = 0;
+            let totalTests = 0;
+
+            await TestRunner.run(
+                // onStart
+                (total) => {
+                    totalTests = total;
+                    totalVal.textContent = total;
+                },
+                // onTestResult
+                (name, isPass, error) => {
+                    const item = document.createElement('div');
+                    item.className = 'test-item';
+
+                    const header = document.createElement('div');
+                    header.className = 'test-header';
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.className = 'test-name';
+                    nameSpan.textContent = name;
+
+                    const badge = document.createElement('span');
+                    badge.className = `test-badge ${isPass ? 'pass' : 'fail'}`;
+                    badge.textContent = isPass ? 'PASS' : 'FAIL';
+
+                    header.appendChild(nameSpan);
+                    header.appendChild(badge);
+                    item.appendChild(header);
+
+                    if (!isPass && error) {
+                        const errorDiv = document.createElement('div');
+                        errorDiv.className = 'test-error';
+                        errorDiv.textContent = error.stack || error.message;
+                        item.appendChild(errorDiv);
+                        currentFailed++;
+                        failedVal.textContent = currentFailed;
+                    } else {
+                        currentPassed++;
+                        passedVal.textContent = currentPassed;
+                    }
+
+                    testList.appendChild(item);
+
+                    // Update progress
+                    const executed = currentPassed + currentFailed;
+                    const percent = (executed / totalTests) * 100;
+                    progressBar.style.width = `${percent}%`;
+                },
+                // onComplete
+                (passed, failed, total) => {
+                    if (failed > 0) {
+                        progressBar.style.backgroundColor = 'var(--danger)';
+                    } else {
+                        progressBar.style.backgroundColor = 'var(--success)';
+                    }
+                }
+            );
+        }
+
+        btnRun.addEventListener('click', executeTests);
+
+        // Auto-run on page load
+        window.addEventListener('DOMContentLoaded', executeTests);
+    </script>
+</body>
+</html>
