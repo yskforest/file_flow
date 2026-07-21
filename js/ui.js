@@ -200,22 +200,41 @@
 
         menu.innerHTML = `
             <div class="filter-actions">
-                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex},'asc')" class="text-btn outline">Sort Ascending</button>
-                <button onclick="FileFlow.ui.Render.sortGridByColumn(${colIndex},'desc')" class="text-btn outline">Sort Descending</button>
+                <button class="text-btn outline sort-asc-btn">Sort Ascending</button>
+                <button class="text-btn outline sort-desc-btn">Sort Descending</button>
             </div>
             <hr class="filter-divider">
             <div class="filter-search-container">
-                <input type="text" id="grid-filter-search" class="search-input full-width" placeholder="Search ${colName}..." onkeyup="FileFlow.ui.Render.filterCheckboxes(this.value)">
+                <input type="text" id="grid-filter-search" class="search-input full-width search-input-field" placeholder="Search ${colName}...">
             </div>
             <div class="filter-bulk-actions">
-                <a href="#" onclick="event.preventDefault();FileFlow.ui.Render.toggleAllCheckboxes(true)">Select All</a> -
-                <a href="#" onclick="event.preventDefault();FileFlow.ui.Render.toggleAllCheckboxes(false)">Clear</a>
+                <a href="#" class="select-all-btn">Select All</a> -
+                <a href="#" class="clear-all-btn">Clear</a>
             </div>
             <div class="filter-options-list" id="grid-checkbox-list">${checkboxes}</div>
             <div class="filter-footer">
-                <button onclick="document.getElementById('grid-filter-menu').classList.add('hidden')" class="text-btn outline">Cancel</button>
-                <button onclick="FileFlow.ui.Render.applyColumnFilter()" class="text-btn">Apply</button>
+                <button class="text-btn outline cancel-btn">Cancel</button>
+                <button class="text-btn apply-btn">Apply</button>
             </div>`;
+
+        // Bind events programmatically
+        menu.querySelector('.sort-asc-btn').addEventListener('click', () => sortGridByColumn(colIndex, 'asc'));
+        menu.querySelector('.sort-desc-btn').addEventListener('click', () => sortGridByColumn(colIndex, 'desc'));
+        
+        const searchInput = menu.querySelector('.search-input-field');
+        searchInput.addEventListener('input', e => filterCheckboxes(e.target.value));
+
+        menu.querySelector('.select-all-btn').addEventListener('click', e => {
+            e.preventDefault();
+            toggleAllCheckboxes(true);
+        });
+        menu.querySelector('.clear-all-btn').addEventListener('click', e => {
+            e.preventDefault();
+            toggleAllCheckboxes(false);
+        });
+
+        menu.querySelector('.cancel-btn').addEventListener('click', () => menu.classList.add('hidden'));
+        menu.querySelector('.apply-btn').addEventListener('click', () => applyColumnFilter());
 
         const rect = btn.getBoundingClientRect();
         menu.style.top = (rect.bottom + window.scrollY + 8) + 'px';
@@ -379,11 +398,21 @@
         wrapper.style.height = '100%';
         list.appendChild(wrapper);
 
+        // Delegated event listener for filter icon button inside wrapper
+        wrapper.addEventListener('click', e => {
+            const filterBtn = e.target.closest('.filter-icon-btn');
+            if (filterBtn) {
+                e.stopPropagation();
+                const colIndex = parseInt(filterBtn.getAttribute('data-col-index'), 10);
+                const colName = filterBtn.getAttribute('data-col-name');
+                toggleFilterMenu(filterBtn, colIndex, colName);
+            }
+        });
+
         const headerHTML = (name, idx) => `
             <div style="display:flex;align-items:center;justify-content:space-between;position:relative">
                 ${name}
-                <button class="filter-icon-btn" title="Filter / Sort by ${name}"
-                    onclick="event.stopPropagation();FileFlow.ui.Render.toggleFilterMenu(this,${idx},'${name}')">
+                <button class="filter-icon-btn" title="Filter / Sort by ${name}" data-col-index="${idx}" data-col-name="${name}">
                     ${Icons.filter}
                 </button>
             </div>`;
@@ -536,7 +565,6 @@
     FileFlow.ui.initModals = initModals;
     FileFlow.ui.Render = {
         renderFileList, applyFilter: renderFileList,
-        toggleFilterMenu, sortGridByColumn, filterCheckboxes, toggleAllCheckboxes, applyColumnFilter,
         downloadCsv
     };
     FileFlow.ui.Stats = {

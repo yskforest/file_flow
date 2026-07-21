@@ -1,15 +1,74 @@
 // FileFlow — Core Namespace & Utilities
-window.FileFlow = {
-    state: {
-        currentRootEntries: [],
-        appSettings: { viewMode: 'tree', actionMode: 'md', excludeDots: true, showFullPath: true },
-        entryMetadata: {},
-        searchQuery: ''
-    },
-    actions: {},
-    ui: {},
-    utils: {}
-};
+(function () {
+    const listeners = {};
+    const subscribe = (event, callback) => {
+        if (!listeners[event]) listeners[event] = [];
+        listeners[event].push(callback);
+        return () => {
+            listeners[event] = listeners[event].filter(cb => cb !== callback);
+        };
+    };
+    const notify = (event, val) => {
+        if (listeners[event]) listeners[event].forEach(cb => cb(val));
+    };
+
+    function createProxy(obj, onChange) {
+        return new Proxy(obj, {
+            set(target, key, value) {
+                if (target[key] !== value) {
+                    target[key] = value;
+                    onChange(key, value);
+                }
+                return true;
+            }
+        });
+    }
+
+    let _currentRootEntries = [];
+    let _appSettings = { viewMode: 'tree', actionMode: 'md', excludeDots: true, showFullPath: true };
+    let _entryMetadata = {};
+    let _searchQuery = '';
+
+    let appSettingsProxy = createProxy(_appSettings, (key, value) => {
+        notify('appSettings', _appSettings);
+        notify(`setting:${key}`, value);
+    });
+
+    const state = {
+        get currentRootEntries() { return _currentRootEntries; },
+        set currentRootEntries(val) {
+            _currentRootEntries = val;
+            notify('currentRootEntries', val);
+        },
+        get appSettings() { return appSettingsProxy; },
+        set appSettings(val) {
+            _appSettings = val;
+            appSettingsProxy = createProxy(_appSettings, (key, value) => {
+                notify('appSettings', _appSettings);
+                notify(`setting:${key}`, value);
+            });
+            notify('appSettings', _appSettings);
+        },
+        get entryMetadata() { return _entryMetadata; },
+        set entryMetadata(val) {
+            _entryMetadata = val;
+            notify('entryMetadata', val);
+        },
+        get searchQuery() { return _searchQuery; },
+        set searchQuery(val) {
+            _searchQuery = val;
+            notify('searchQuery', val);
+        },
+        subscribe
+    };
+
+    window.FileFlow = {
+        state,
+        actions: {},
+        ui: {},
+        utils: {}
+    };
+})();
 
 (function () {
     const FF = FileFlow;

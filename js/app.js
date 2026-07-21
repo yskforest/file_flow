@@ -9,6 +9,7 @@
     function init() {
         injectIcons();
         FileFlow.ui.initModals();
+        setupReactivity();
         loadSettings();
         bindEvents();
         updateModeDisplay();
@@ -24,26 +25,62 @@
         $('clear-btn').innerHTML = Icons.trash;
     }
 
+    // --- Reactivity ---
+
+    function setupReactivity() {
+        // Auto-save settings when changed
+        State.subscribe('appSettings', (newSettings) => {
+            try {
+                localStorage.setItem('FileFlowSettings', JSON.stringify(newSettings));
+            } catch (e) {
+                console.warn('Failed to save settings', e);
+            }
+        });
+
+        // Sync mode display badge and modal input
+        State.subscribe('setting:actionMode', (val) => {
+            updateModeDisplay();
+            const radio = document.querySelector(`input[name="action-mode"][value="${val}"]`);
+            if (radio) radio.checked = true;
+        });
+
+        // Sync setting checkbox and trigger render list
+        State.subscribe('setting:excludeDots', (val) => {
+            const dc = $('exclude-dots-checkbox');
+            if (dc) dc.checked = val;
+            Render.renderFileList();
+        });
+
+        State.subscribe('setting:showFullPath', (val) => {
+            const fp = $('show-fullpath-checkbox');
+            if (fp) fp.checked = val;
+            Render.renderFileList();
+        });
+
+        // Sync view mode and trigger render list
+        State.subscribe('setting:viewMode', () => {
+            Render.renderFileList();
+        });
+    }
+
     // --- Settings ---
 
     function loadSettings() {
         try {
             const saved = localStorage.getItem('FileFlowSettings');
-            if (saved) State.appSettings = { ...State.appSettings, ...JSON.parse(saved) };
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                State.appSettings = { ...State.appSettings, ...parsed };
+            }
         } catch (e) { console.warn('Failed to load settings', e); }
 
-        // Sync UI
+        // Sync UI state
         const dc = $('exclude-dots-checkbox');
         if (dc) dc.checked = State.appSettings.excludeDots;
         const fp = $('show-fullpath-checkbox');
         if (fp) fp.checked = State.appSettings.showFullPath;
         const radio = document.querySelector(`input[name="action-mode"][value="${State.appSettings.actionMode}"]`);
         if (radio) radio.checked = true;
-    }
-
-    function saveSettings() {
-        try { localStorage.setItem('FileFlowSettings', JSON.stringify(State.appSettings)); }
-        catch (e) { console.warn('Failed to save settings', e); }
     }
 
     function updateModeDisplay() {
@@ -86,7 +123,6 @@
         // View Toggle
         $('view-toggle-btn').addEventListener('click', () => {
             State.appSettings.viewMode = State.appSettings.viewMode === 'tree' ? 'list' : 'tree';
-            Render.renderFileList();
         });
 
         // Settings Modal
@@ -98,21 +134,17 @@
         document.querySelectorAll('input[name="action-mode"]').forEach(radio => {
             radio.addEventListener('change', e => {
                 State.appSettings.actionMode = e.target.value;
-                saveSettings();
-                updateModeDisplay();
             });
         });
 
-        const bindCheckbox = (id, key, rerender) => {
+        const bindCheckbox = (id, key) => {
             const el = $(id);
             if (el) el.addEventListener('change', e => {
                 State.appSettings[key] = e.target.checked;
-                saveSettings();
-                if (rerender) Render.renderFileList();
             });
         };
-        bindCheckbox('exclude-dots-checkbox', 'excludeDots', true);
-        bindCheckbox('show-fullpath-checkbox', 'showFullPath', true);
+        bindCheckbox('exclude-dots-checkbox', 'excludeDots');
+        bindCheckbox('show-fullpath-checkbox', 'showFullPath');
 
         // Filter
         let debounce;
