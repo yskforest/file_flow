@@ -1,6 +1,6 @@
-// FileFlow — NotebookLM Export Module
+// FileFlow — NotebookLM & AI Agent OKF Export Module
 (function () {
-    const { $, formatBytes, FS, Detect, downloadBlob } = FileFlow.utils;
+    const { $, formatBytes, FS, downloadBlob } = FileFlow.utils;
     const State = FileFlow.state;
     const Status = FileFlow.ui.Status;
 
@@ -9,8 +9,10 @@
     // =====================================================================
 
     const DEFAULT_CONFIG = {
+        mode: 'auto',                            // 'auto' | 'vcxproj' | 'folder_structure'
+        ext: '.md',                              // '.md' | '.txt'
         maxPartSizeBytes: 4 * 1024 * 1024,       // 4MB per output file
-        maxSingleFileSizeBytes: 1 * 1024 * 1024,  // Skip files > 1MB
+        maxSingleFileSizeBytes: 1 * 1024 * 1024,  // Skip files > 1MB by default
         sourceExtensions: new Set([
             '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.hxx', '.inl',
             '.cs', '.rc', '.idl', '.def', '.asm', '.s',
@@ -31,12 +33,6 @@
     // =====================================================================
 
     const VcxprojParser = {
-        /**
-         * Parse a vcxproj file content and return build unit info.
-         * @param {string} xmlText - Raw XML content
-         * @param {string} projPath - Relative path of the vcxproj file
-         * @returns {object} Parsed project info
-         */
         parseProject(xmlText, projPath) {
             const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
             const ns = 'http://schemas.microsoft.com/developer/msbuild/2003';
@@ -57,7 +53,6 @@
             // Extract configurations
             const configNodes = doc.querySelectorAll('ProjectConfiguration');
             if (configNodes.length === 0) {
-                // Try with namespace
                 const pgNodes = doc.getElementsByTagNameNS(ns, 'ProjectConfiguration');
                 for (const n of pgNodes) {
                     info.configurations.push(n.getAttribute('Include') || n.textContent.trim());
@@ -68,14 +63,12 @@
                 });
             }
 
-            // Helper: get text of first matching element
             const getText = (parent, tag) => {
                 let el = parent.querySelector(tag);
                 if (!el) el = parent.getElementsByTagNameNS(ns, tag)[0];
                 return el ? el.textContent.trim() : '';
             };
 
-            // Extract defines and include dirs from PropertyGroup/ItemDefinitionGroup
             const defGroups = [...doc.querySelectorAll('ItemDefinitionGroup'),
                 ...doc.getElementsByTagNameNS(ns, 'ItemDefinitionGroup')];
             for (const g of defGroups) {
@@ -97,7 +90,6 @@
                 }
             }
 
-            // Collect file items
             const collectItems = (tag, arr) => {
                 const nodes = [...doc.querySelectorAll(tag),
                     ...doc.getElementsByTagNameNS(ns, tag)];
@@ -118,11 +110,6 @@
             return info;
         },
 
-        /**
-         * Parse a .vcxproj.filters file and return filter mappings.
-         * @param {string} xmlText
-         * @returns {object} { relativePath: filterString }
-         */
         parseFilters(xmlText) {
             const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
             const ns = 'http://schemas.microsoft.com/developer/msbuild/2003';
@@ -150,38 +137,43 @@
     };
 
     // =====================================================================
-    //  SourceConsolidator — Merge source files into parts (≤4MB each)
+    //  SourceConsolidator — Merge source files into OKF Markdown parts
     // =====================================================================
 
     const SourceConsolidator = {
 
         /**
-         * Main entry: consolidate all files into part strings.
+         * Consolidate files into OKF-compliant Markdown / Text files.
          * @param {object} opts
-         * @param {Array} opts.fileItems - [{entry, relativePath, projectName, filter, encoding}]
-         * @param {Array} opts.projects - parsed vcxproj info objects
-         * @param {number} opts.maxPartSize - max bytes per part
-         * @param {number} opts.maxSingleFileSize - skip files larger than this
-         * @param {Function} opts.onProgress - progress callback (processed, total)
+         * @param {Array} opts.fileItems
+         * @param {Array} opts.projects
+         * @param {string} opts.mode - 'vcxproj' | 'folder_structure'
+         * @param {string} opts.ext - '.md' | '.txt'
+         * @param {number} opts.maxPartSize - bytes (0 or Infinity for unsplit)
+         * @param {number} opts.maxSingleFileSize
+         * @param {Function} opts.onProgress
          * @returns {Promise<Array<{filename: string, blob: Blob}>>}
          */
-        async consolidate({ fileItems, projects, maxPartSize, maxSingleFileSize, onProgress }) {
+        async consolidate({ fileItems, projects, mode = 'folder_structure', ext = '.md', maxPartSize, maxSingleFileSize, onProgress }) {
             const encoder = new TextEncoder();
+            const effectivePartSize = (maxPartSize && maxPartSize > 0) ? maxPartSize : Infinity;
+
             const parts = [];
             let currentLines = [];
             let currentSize = 0;
             let partIndex = 1;
-            const partFileList = [];     // tracks files per part for index
+            const partFileList = [];
             let currentPartFiles = [];
 
-            // Generate project summary header (compact, token-efficient)
-            const projectSummary = this._buildProjectSummary(projects, fileItems.length);
+            // Detect entry points & build directory tree for headers
+            const entryPoints = _detectEntryPoints(fileItems);
+            const directoryTree = _buildDirectoryTree(fileItems, 4);
 
             // Process files
             for (let i = 0; i < fileItems.length; i++) {
                 const item = fileItems[i];
 
-                if (onProgress && i % 100 === 0) {
+                if (onProgress && i % 50 === 0) {
                     onProgress(i, fileItems.length);
                     await new Promise(r => setTimeout(r, 0));
                 }
@@ -189,22 +181,20 @@
                 let content;
                 try {
                     const file = await new Promise((res, rej) => item.entry.file(res, rej));
-                    if (file.size > (maxSingleFileSize || maxPartSize)) continue; // Skip oversized files
+                    if (maxSingleFileSize && file.size > maxSingleFileSize) continue; // Skip oversized
                     const buf = await file.arrayBuffer();
                     content = this._decodeToUtf8(new Uint8Array(buf));
                 } catch {
                     continue;
                 }
 
-                // Build compact file block
-                const fileBlock = this._buildFileBlock(item, content);
+                // Build OKF File Block
+                const fileBlock = this._buildOKFFileBlock(item, content);
                 const blockBytes = encoder.encode(fileBlock).length;
 
-                // Check if adding this block would exceed limit
-                // Reserve space for index header (~2KB)
-                const reserved = currentLines.length === 0 ? 2048 : 0;
-                if (currentSize + blockBytes + reserved > maxPartSize && currentLines.length > 0) {
-                    // Finalize current part
+                // Check size limit (reserve ~3KB for frontmatter & index header)
+                const reserved = currentLines.length === 0 ? 3072 : 0;
+                if (currentSize + blockBytes + reserved > effectivePartSize && currentLines.length > 0) {
                     partFileList.push([...currentPartFiles]);
                     parts.push({ lines: currentLines, size: currentSize });
                     currentLines = [];
@@ -219,7 +209,8 @@
                     path: item.relativePath,
                     project: item.projectName || '',
                     filter: item.filter || '',
-                    size: content.length
+                    size: content.length,
+                    globalIndex: i + 1
                 });
             }
 
@@ -231,20 +222,56 @@
 
             if (onProgress) onProgress(fileItems.length, fileItems.length);
 
-            // Build final blobs with index headers
             const totalParts = parts.length;
             const results = [];
             const rootName = State.currentRootEntries.length === 1
                 ? State.currentRootEntries[0].name : 'project';
 
+            // Flat global file index for cross-part reference
+            const allFilesIndex = fileItems.map((item, idx) => ({
+                path: item.relativePath,
+                project: item.projectName || '',
+                filter: item.filter || '',
+                num: idx + 1
+            }));
+
+            const cleanExt = ext.startsWith('.') ? ext : '.' + ext;
+
             for (let p = 0; p < parts.length; p++) {
-                const index = this._buildPartIndex(p + 1, totalParts, partFileList[p], projectSummary, p === 0);
+                const partNum = p + 1;
+                const partFiles = partFileList[p];
+                const partSizeBytes = parts[p].size;
+
+                // OKF YAML Frontmatter
+                const frontmatter = this._buildOKFFrontmatter({
+                    rootName,
+                    partNum,
+                    totalParts,
+                    fileCount: partFiles.length,
+                    totalSizeBytes: partSizeBytes,
+                    mode,
+                    entryPoints
+                });
+
+                // Header & Directory Tree & Global Index
+                const header = this._buildOKFHeader({
+                    rootName,
+                    partNum,
+                    totalParts,
+                    mode,
+                    projects,
+                    directoryTree,
+                    allFilesIndex,
+                    currentPartFiles: partFiles
+                });
+
                 const body = parts[p].lines.join('');
-                const fullText = index + body;
-                const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), fullText], { type: 'text/plain;charset=utf-8' });
-                const num = String(p + 1).padStart(3, '0');
+                const fullText = frontmatter + header + body;
+                const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), fullText], { type: 'text/markdown;charset=utf-8' });
+                const num = String(partNum).padStart(3, '0');
+                const totalNum = String(totalParts).padStart(3, '0');
                 results.push({
-                    filename: `${rootName}_src_${num}_of_${String(totalParts).padStart(3, '0')}.txt`,
+                    filename: `${rootName}_src_${num}_of_${totalNum}${cleanExt}`,
                     blob
                 });
             }
@@ -252,80 +279,117 @@
             return results;
         },
 
-        // --- Private helpers ---
+        // --- OKF Format Building Helpers ---
 
-        _buildProjectSummary(projects, totalFiles) {
-            if (!projects.length) return '';
-            const lines = ['# Build Units (vcxproj)\n'];
-            for (const p of projects) {
-                lines.push(`## ${p.name} (${p.path})`);
-                if (p.configurations.length)
-                    lines.push(`  Config: ${p.configurations.join(', ')}`);
-                if (p.defines.length)
-                    lines.push(`  Defines: ${p.defines.slice(0, 20).join(';')}${p.defines.length > 20 ? '...' : ''}`);
-                if (p.includeDirs.length)
-                    lines.push(`  IncludeDirs: ${p.includeDirs.slice(0, 10).join(';')}${p.includeDirs.length > 10 ? '...' : ''}`);
-                lines.push(`  Sources: ${p.sourceFiles.length} | Headers: ${p.headerFiles.length} | Resources: ${p.resourceFiles.length}`);
+        _buildOKFFrontmatter({ rootName, partNum, totalParts, fileCount, totalSizeBytes, mode, entryPoints }) {
+            const lines = [
+                '---',
+                'type: codebase_export',
+                'format_version: "1.0-okf"',
+                `title: "${rootName} Source Code Export (Part ${partNum}/${totalParts})"`,
+                'description: "Consolidated codebase export formatted for NotebookLM and AI agents"',
+                `export_mode: "${mode}"`,
+                `part_number: ${partNum}`,
+                `total_parts: ${totalParts}`,
+                `file_count: ${fileCount}`,
+                `total_size_bytes: ${totalSizeBytes}`,
+                `generated_at: "${new Date().toISOString()}"`
+            ];
+            if (entryPoints && entryPoints.length > 0) {
+                lines.push('entry_points:');
+                for (const ep of entryPoints) {
+                    lines.push(`  - "${ep}"`);
+                }
+            }
+            lines.push('---', '');
+            return lines.join('\n');
+        },
+
+        _buildOKFHeader({ rootName, partNum, totalParts, mode, projects, directoryTree, allFilesIndex, currentPartFiles }) {
+            const lines = [];
+            lines.push(`# Project Overview & Structure`);
+            lines.push(`- **Root Workspace**: \`${rootName}\``);
+            lines.push(`- **Export Mode**: \`${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'}\``);
+            lines.push(`- **Total Project Files**: ${allFilesIndex.length} | **Files in Part ${partNum}/${totalParts}**: ${currentPartFiles.length}\n`);
+
+            if (mode === 'vcxproj' && projects && projects.length > 0) {
+                lines.push(`## Build Units (Visual Studio Projects)`);
+                for (const p of projects) {
+                    lines.push(`### Project: ${p.name}`);
+                    lines.push(`- **Path**: \`${p.path}\``);
+                    if (p.configurations.length) lines.push(`- **Configs**: \`${p.configurations.join(', ')}\``);
+                    if (p.defines.length) lines.push(`- **Defines**: \`${p.defines.slice(0, 15).join('; ')}${p.defines.length > 15 ? '...' : ''}\``);
+                    if (p.includeDirs.length) lines.push(`- **Include Dirs**: \`${p.includeDirs.slice(0, 10).join('; ')}${p.includeDirs.length > 10 ? '...' : ''}\``);
+                    lines.push(`- **File Counts**: Sources (${p.sourceFiles.length}) | Headers (${p.headerFiles.length}) | Resources (${p.resourceFiles.length})`);
+                    lines.push('');
+                }
+            }
+
+            if (directoryTree) {
+                lines.push(`## Directory Tree Structure`);
+                lines.push('```');
+                lines.push(directoryTree);
+                lines.push('```');
                 lines.push('');
             }
-            return lines.join('\n');
-        },
 
-        _buildPartIndex(partNum, totalParts, fileList, projectSummary, isFirstPart) {
-            const lines = [];
-            lines.push(`# Source Code Export — Part ${partNum}/${totalParts}`);
-            lines.push(`# Files in this part: ${fileList.length}\n`);
+            lines.push(`## Global File Index (Part ${partNum} of ${totalParts})`);
+            const currentPaths = new Set(currentPartFiles.map(f => f.path));
 
-            // Include project summary only in part 1
-            if (isFirstPart && projectSummary) {
-                lines.push(projectSummary);
+            for (const item of allFilesIndex) {
+                const isCurrent = currentPaths.has(item.path);
+                const mark = isCurrent ? '[x]' : '[ ]';
+                const projInfo = item.project ? ` [${item.project}]` : '';
+                const fltInfo = item.filter ? ` (${item.filter})` : '';
+                const status = isCurrent ? '(This Part)' : '';
+                lines.push(`${mark} ${item.num}. \`${item.path}\`${projInfo}${fltInfo} ${status}`.trim());
             }
-
-            // Compact file listing
-            lines.push('# File Index');
-            for (let i = 0; i < fileList.length; i++) {
-                const f = fileList[i];
-                const proj = f.project ? ` [${f.project}]` : '';
-                const flt = f.filter ? ` (${f.filter})` : '';
-                lines.push(`#  ${i + 1}. ${f.path}${proj}${flt}`);
-            }
-            lines.push('\n');
+            lines.push('', '---', '', '# Source Code Section', '');
 
             return lines.join('\n');
         },
 
-        _buildFileBlock(item, content) {
-            // Compact, token-efficient format:
-            // --- path/to/file.cpp [ProjectName | Filter/Path] ---
-            // <content>
-            //
-            const meta = [];
-            if (item.projectName) meta.push(item.projectName);
-            if (item.filter) meta.push(item.filter);
-            const metaStr = meta.length ? ` [${meta.join(' | ')}]` : '';
+        _buildOKFFileBlock(item, content) {
+            const lang = _detectLanguage(item.relativePath);
+            const folderPath = item.relativePath.includes('/') ? item.relativePath.replace(/\/[^/]+$/, '') : '.';
+            const metaLines = [
+                `path: "${item.relativePath}"`,
+                `folder: "${folderPath}"`
+            ];
+            if (item.projectName) metaLines.push(`project: "${item.projectName}"`);
+            if (item.filter) metaLines.push(`filter: "${item.filter}"`);
+            metaLines.push(`extension: "${_getExtension(item.relativePath)}"`);
+            metaLines.push(`size_bytes: ${item.size}`);
 
-            return `--- ${item.relativePath}${metaStr} ---\n${content}\n\n`;
+            return [
+                `## File: \`${item.relativePath}\``,
+                '',
+                '```yaml',
+                metaLines.join('\n'),
+                '```',
+                '',
+                `\`\`\`${lang}`,
+                content,
+                '```',
+                '',
+                ''
+            ].join('\n');
         },
 
         _decodeToUtf8(uint8) {
-            // Try UTF-8 first
             try {
                 const text = new TextDecoder('utf-8', { fatal: true }).decode(uint8);
-                // Strip BOM if present
                 return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
             } catch { /* not UTF-8 */ }
 
-            // Try Shift_JIS
             try {
                 return new TextDecoder('shift_jis', { fatal: true }).decode(uint8);
             } catch { /* not Shift_JIS */ }
 
-            // Try EUC-JP
             try {
                 return new TextDecoder('euc-jp', { fatal: true }).decode(uint8);
             } catch { /* not EUC-JP */ }
 
-            // Try UTF-16 LE / BE
             if (uint8.length >= 2) {
                 if (uint8[0] === 0xFF && uint8[1] === 0xFE) {
                     try { return new TextDecoder('utf-16le').decode(uint8); } catch { }
@@ -335,30 +399,25 @@
                 }
             }
 
-            // Fallback: lossy UTF-8
             return new TextDecoder('utf-8', { fatal: false }).decode(uint8);
         }
     };
 
     // =====================================================================
-    //  Export Orchestrator — Scans, parses vcxproj, consolidates, downloads
+    //  Export Orchestrator — Scans, parses vcxproj, previews & exports
     // =====================================================================
 
-    async function exportForNotebookLM() {
+    async function scanProjects() {
         const roots = State.currentRootEntries;
         if (!roots.length) {
-            Status.error('No files loaded. Drop a folder first.');
-            return;
+            return { projects: [], fileItems: [], totalSizeBytes: 0 };
         }
 
         const config = getExportConfig();
-        Status.show('Scanning for vcxproj files...', true);
-        await new Promise(r => setTimeout(r, 50));
 
-        // 1. Scan for .vcxproj and .vcxproj.filters
         const vcxprojEntries = [];
         const filterEntries = [];
-        const allFileEntries = [];    // {entry, relativePath}
+        const allFileEntries = [];
 
         await FS.traverse(roots, async entry => {
             if (entry.isFile) {
@@ -373,12 +432,8 @@
             return true;
         }, { excludeDots: State.appSettings.excludeDots });
 
-        // 2. Parse vcxproj files
-        Status.show(`Parsing ${vcxprojEntries.length} vcxproj file(s)...`, true);
-        await new Promise(r => setTimeout(r, 0));
-
         const projects = [];
-        const projectFileMap = new Map();  // normalized path -> project info
+        const projectFileMap = new Map();
 
         for (const entry of vcxprojEntries) {
             try {
@@ -386,7 +441,6 @@
                 const text = await file.text();
                 const projInfo = VcxprojParser.parseProject(text, entry.fullPath);
 
-                // Parse corresponding .filters file
                 const filterName = entry.name + '.filters';
                 const filterEntry = filterEntries.find(f => f.name === filterName &&
                     f.fullPath.replace(f.name, '') === entry.fullPath.replace(entry.name, ''));
@@ -400,7 +454,6 @@
 
                 projects.push(projInfo);
 
-                // Map each referenced file to its project
                 const projDir = entry.fullPath.replace(/\/[^/]+$/, '');
                 const allRefs = [
                     ...projInfo.sourceFiles,
@@ -420,11 +473,8 @@
             }
         }
 
-        // 3. Collect target source files
-        Status.show('Collecting source files...', true);
-        await new Promise(r => setTimeout(r, 0));
-
         const fileItems = [];
+        let totalSizeBytes = 0;
         const isSingleRoot = roots.length === 1 && roots[0].isDirectory;
         const rootPrefix = isSingleRoot ? roots[0].fullPath : '';
 
@@ -436,78 +486,322 @@
                 ? entry.fullPath.replace(rootPrefix + '/', '').replace(rootPrefix, '')
                 : entry.fullPath.replace(/^\//, '');
 
-            // Lookup project membership
             const normalizedPath = _normalizePath(entry.fullPath);
             const projRef = projectFileMap.get(normalizedPath) || _fuzzyMatchProject(entry, projectFileMap);
+
+            let fileSize = 0;
+            const meta = State.entryMetadata[entry.fullPath];
+            if (meta?.size !== undefined) {
+                fileSize = meta.size;
+            } else {
+                try {
+                    const file = await new Promise((res, rej) => entry.file(res, rej));
+                    fileSize = file.size;
+                } catch { /* ignore */ }
+            }
+
+            totalSizeBytes += fileSize;
 
             fileItems.push({
                 entry,
                 relativePath,
                 projectName: projRef?.projectName || '',
-                filter: projRef?.filter || ''
+                filter: projRef?.filter || '',
+                size: fileSize
             });
         }
 
-        if (!fileItems.length) {
-            Status.error('No source files found matching the configured extensions.');
+        // Default sort: path-based for folder structure consistency
+        fileItems.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+        return { projects, fileItems, totalSizeBytes };
+    }
+
+    async function showVcxprojPreviewModal() {
+        const roots = State.currentRootEntries;
+        if (!roots.length) {
+            Status.error('No files loaded. Drop a folder first.');
             return;
         }
 
-        // Sort: group by project, then by path
-        fileItems.sort((a, b) => {
-            if (a.projectName !== b.projectName) return a.projectName.localeCompare(b.projectName);
-            return a.relativePath.localeCompare(b.relativePath);
-        });
+        Status.show('Scanning projects and directory structure...', true);
+        await new Promise(r => setTimeout(r, 20));
 
-        // 4. Consolidate into parts
-        Status.show(`Consolidating ${fileItems.length} files...`, true);
+        try {
+            const data = await scanProjects();
+            Status.hide();
+            FileFlow.ui.VcxprojPreview.show(data);
+        } catch (err) {
+            console.error('Project scanning error:', err);
+            Status.error('Failed to scan projects: ' + err.message);
+        }
+    }
+
+    /**
+     * Main export function for NotebookLM / LLM Agents.
+     * @param {object} options
+     * @param {Array<string>|null} options.selectedProjectNames
+     * @param {string} options.mode - 'vcxproj' | 'folder_structure'
+     * @param {string} options.ext - '.md' | '.txt'
+     * @param {number} options.maxPartSizeBytes - bytes (0 or Infinity for unsplit)
+     */
+    async function exportForNotebookLM(options = {}) {
+        const {
+            selectedProjectNames = null,
+            mode = 'folder_structure',
+            ext = '.md',
+            maxPartSizeBytes = 4 * 1024 * 1024
+        } = typeof options === 'object' && !Array.isArray(options) ? options : { selectedProjectNames: options };
+
+        const roots = State.currentRootEntries;
+        if (!roots.length) {
+            Status.error('No files loaded. Drop a folder first.');
+            return;
+        }
+
+        const config = getExportConfig();
+        Status.show('Preparing export data...', true);
+        await new Promise(r => setTimeout(r, 20));
+
+        const { projects, fileItems: allItems } = await scanProjects();
+
+        let targetProjects = projects;
+        let fileItems = allItems;
+
+        if (mode === 'vcxproj' && selectedProjectNames && Array.isArray(selectedProjectNames)) {
+            const selectedSet = new Set(selectedProjectNames);
+            targetProjects = projects.filter(p => selectedSet.has(p.name));
+            fileItems = allItems.filter(item => !item.projectName || selectedSet.has(item.projectName));
+        }
+
+        if (!fileItems.length) {
+            Status.error('No source files found matching the selected parameters.');
+            return;
+        }
+
+        // Sort file items depending on mode
+        if (mode === 'vcxproj') {
+            fileItems.sort((a, b) => {
+                if (a.projectName !== b.projectName) return (a.projectName || 'Z').localeCompare(b.projectName || 'Z');
+                return a.relativePath.localeCompare(b.relativePath);
+            });
+        } else {
+            fileItems.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+        }
+
+        Status.show(`Consolidating ${fileItems.length.toLocaleString()} files (OKF Markdown)...`, true);
 
         const results = await SourceConsolidator.consolidate({
             fileItems,
-            projects,
-            maxPartSize: config.maxPartSizeBytes,
+            projects: targetProjects,
+            mode,
+            ext,
+            maxPartSize: maxPartSizeBytes,
             maxSingleFileSize: config.maxSingleFileSizeBytes,
             onProgress(done, total) {
                 Status.show(`Processing files... (${done.toLocaleString()} / ${total.toLocaleString()})`, true);
             }
         });
 
-        // 5. Download
-        if (results.length === 1) {
-            // Single file — download directly
-            downloadBlob(results[0].blob, results[0].filename);
-            Status.show(`Exported: ${results[0].filename} (${formatBytes(results[0].blob.size)})`);
+        // Generate CSV files based on mode
+        const targetFilesCsvBlob = _generateTargetFilesCsv(fileItems);
+        let secondaryCsvBlob = null;
+        let secondaryCsvName = '';
+
+        if (mode === 'vcxproj') {
+            secondaryCsvBlob = _generateVcxprojCsv(targetProjects);
+            secondaryCsvName = 'vcxproj_list.csv';
         } else {
-            // Multiple files — pack into ZIP
-            Status.show(`Creating ZIP with ${results.length} parts...`, true);
-            try {
-                const zip = new JSZip();
-                for (const r of results) {
-                    zip.file(r.filename, r.blob);
-                }
-                const zipBlob = await zip.generateAsync({ type: 'blob' });
-                const rootName = roots.length === 1 ? roots[0].name : 'project';
-                downloadBlob(zipBlob, `${rootName}_notebooklm_export.zip`);
-                Status.show(`Exported ${results.length} parts as ZIP (${formatBytes(zipBlob.size)})`);
-            } catch (e) {
-                // Fallback: download individually
-                console.warn('ZIP creation failed, downloading individually:', e);
-                for (const r of results) {
-                    downloadBlob(r.blob, r.filename);
-                    await new Promise(res => setTimeout(res, 300));
-                }
-                Status.show(`Exported ${results.length} files individually`);
+            secondaryCsvBlob = _generateFolderStructureCsv(fileItems);
+            secondaryCsvName = 'folder_structure.csv';
+        }
+
+        Status.show(`Creating ZIP package with ${results.length} file(s) and metadata CSVs...`, true);
+        const rootName = roots.length === 1 ? roots[0].name : 'project';
+
+        try {
+            const zip = new JSZip();
+            for (const r of results) {
+                zip.file(r.filename, r.blob);
             }
+            zip.file(secondaryCsvName, secondaryCsvBlob);
+            zip.file('target_files_list.csv', targetFilesCsvBlob);
+
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+            downloadBlob(zipBlob, `${rootName}_notebooklm_export.zip`);
+            Status.show(`Exported ZIP containing ${results.length} part(s) + 2 CSVs (${formatBytes(zipBlob.size)})`);
+        } catch (e) {
+            console.warn('ZIP creation failed, downloading files individually:', e);
+            for (const r of results) {
+                downloadBlob(r.blob, r.filename);
+                await new Promise(res => setTimeout(res, 300));
+            }
+            downloadBlob(secondaryCsvBlob, secondaryCsvName);
+            await new Promise(res => setTimeout(res, 300));
+            downloadBlob(targetFilesCsvBlob, 'target_files_list.csv');
+            Status.show(`Exported ${results.length + 2} files individually`);
         }
     }
 
     // =====================================================================
-    //  Export Config Helpers
+    //  CSV Generators
     // =====================================================================
+
+    function _generateVcxprojCsv(projects) {
+        const headers = ['Project Name', 'Project Path', 'Configurations', 'Sources', 'Headers', 'Resources', 'Preprocessor Defines', 'Include Directories'];
+        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+
+        const rows = projects.map(p => [
+            escape(p.name),
+            escape(p.path),
+            escape(p.configurations.join('; ')),
+            p.sourceFiles.length,
+            p.headerFiles.length,
+            p.resourceFiles.length,
+            escape(p.defines.join('; ')),
+            escape(p.includeDirs.join('; '))
+        ]);
+
+        const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
+        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+    }
+
+    function _generateFolderStructureCsv(fileItems) {
+        const headers = ['Folder Path', 'Parent Folder', 'Depth', 'File Count', 'Total Size (Bytes)'];
+        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+
+        const folderMap = new Map();
+        for (const item of fileItems) {
+            const folderPath = item.relativePath.includes('/') ? item.relativePath.replace(/\/[^/]+$/, '') : '.';
+            if (!folderMap.has(folderPath)) {
+                const parts = folderPath === '.' ? [] : folderPath.split('/');
+                const parentFolder = parts.length > 1 ? parts.slice(0, -1).join('/') : (folderPath === '.' ? '' : '.');
+                folderMap.set(folderPath, {
+                    folderPath,
+                    parentFolder,
+                    depth: parts.length,
+                    fileCount: 0,
+                    totalSize: 0
+                });
+            }
+            const info = folderMap.get(folderPath);
+            info.fileCount++;
+            info.totalSize += (item.size || 0);
+        }
+
+        const rows = [...folderMap.values()].map(f => [
+            escape(f.folderPath),
+            escape(f.parentFolder),
+            f.depth,
+            f.fileCount,
+            f.totalSize
+        ]);
+
+        const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
+        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+    }
+
+    function _generateTargetFilesCsv(fileItems) {
+        const headers = ['File Path', 'Project Name', 'Filter Path', 'Size (Bytes)', 'Extension'];
+        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+
+        const rows = fileItems.map(item => [
+            escape(item.relativePath),
+            escape(item.projectName || ''),
+            escape(item.filter || ''),
+            item.size || 0,
+            escape(_getExtension(item.relativePath))
+        ]);
+
+        const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
+        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+    }
+
+    // =====================================================================
+    //  Helper Functions
+    // =====================================================================
+
+    function _detectEntryPoints(fileItems) {
+        const targets = new Set([
+            'main.cpp', 'main.c', 'main.py', 'main.go', 'main.rs', 'main.js', 'main.ts',
+            'index.js', 'index.ts', 'index.html', 'app.js', 'app.py', 'app.ts', 'server.js', 'server.ts',
+            'cmakelists.txt', 'package.json', 'cargo.toml', 'go.mod', 'makefile', 'pyproject.toml',
+            'requirements.txt', 'build.gradle', 'pom.xml'
+        ]);
+        const entryPoints = [];
+        for (const item of fileItems) {
+            const name = item.relativePath.split('/').pop().toLowerCase();
+            if (targets.has(name) || name.endsWith('.vcxproj') || name.endsWith('.sln')) {
+                entryPoints.push(item.relativePath);
+            }
+        }
+        return entryPoints.slice(0, 15);
+    }
+
+    function _buildDirectoryTree(fileItems, maxDepth = 4) {
+        const root = {};
+        for (const item of fileItems) {
+            const parts = item.relativePath.split('/');
+            let curr = root;
+            for (let i = 0; i < parts.length; i++) {
+                const part = parts[i];
+                const isFile = (i === parts.length - 1);
+                if (!curr[part]) {
+                    curr[part] = isFile ? null : {};
+                }
+                if (!isFile) curr = curr[part];
+            }
+        }
+
+        const lines = [];
+        function formatTree(node, prefix = '', depth = 1) {
+            if (depth > maxDepth) {
+                lines.push(prefix + '└── ... (deeper levels omitted)');
+                return;
+            }
+            const keys = Object.keys(node).sort((a, b) => {
+                const aIsDir = node[a] !== null;
+                const bIsDir = node[b] !== null;
+                if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+                return a.localeCompare(b);
+            });
+
+            for (let i = 0; i < keys.length; i++) {
+                const key = keys[i];
+                const isLast = (i === keys.length - 1);
+                const isDir = node[key] !== null;
+                const connector = isLast ? '└── ' : '├── ';
+                lines.push(prefix + connector + key + (isDir ? '/' : ''));
+                if (isDir) {
+                    const childPrefix = prefix + (isLast ? '    ' : '│   ');
+                    formatTree(node[key], childPrefix, depth + 1);
+                }
+            }
+        }
+        formatTree(root, '', 1);
+        return lines.join('\n');
+    }
+
+    function _detectLanguage(filename) {
+        const ext = filename.split('.').pop().toLowerCase();
+        const map = {
+            'cpp': 'cpp', 'c': 'c', 'cc': 'cpp', 'cxx': 'cpp', 'h': 'cpp', 'hpp': 'cpp', 'hxx': 'cpp', 'inl': 'cpp',
+            'cs': 'csharp', 'java': 'java', 'py': 'python', 'js': 'javascript', 'ts': 'typescript',
+            'jsx': 'javascript', 'tsx': 'typescript', 'xml': 'xml', 'xaml': 'xml', 'json': 'json',
+            'yml': 'yaml', 'yaml': 'yaml', 'sql': 'sql', 'proto': 'protobuf', 'thrift': 'thrift',
+            'hlsl': 'hlsl', 'glsl': 'glsl', 'fx': 'hlsl', 'cmake': 'cmake', 'mk': 'makefile', 'mak': 'makefile',
+            'bat': 'bat', 'cmd': 'bat', 'sh': 'bash', 'ps1': 'powershell', 'txt': 'plaintext', 'md': 'markdown',
+            'rst': 'rst', 'cfg': 'ini', 'ini': 'ini', 'conf': 'ini', 'toml': 'toml',
+            'sln': 'plaintext', 'vcxproj': 'xml', 'csproj': 'xml', 'props': 'xml', 'targets': 'xml'
+        };
+        return map[ext] || 'text';
+    }
 
     function getExportConfig() {
         const saved = State.appSettings.notebookLMConfig || {};
         return {
+            mode: saved.mode || DEFAULT_CONFIG.mode,
+            ext: saved.ext || DEFAULT_CONFIG.ext,
             maxPartSizeBytes: saved.maxPartSizeMB
                 ? saved.maxPartSizeMB * 1024 * 1024
                 : DEFAULT_CONFIG.maxPartSizeBytes,
@@ -525,12 +819,7 @@
         return [...DEFAULT_CONFIG.sourceExtensions].join(', ');
     }
 
-    // =====================================================================
-    //  Path Utilities
-    // =====================================================================
-
     function _normalizePath(p) {
-        // Collapse ../ and ./ , normalize slashes
         const parts = p.replace(/\\/g, '/').split('/');
         const stack = [];
         for (const seg of parts) {
@@ -546,7 +835,6 @@
     }
 
     function _fuzzyMatchProject(entry, projectFileMap) {
-        // Try matching by filename only (for files referenced with relative paths)
         const name = entry.name.toLowerCase();
         for (const [path, ref] of projectFileMap) {
             if (path.endsWith('/' + name) || path === name) {
@@ -556,11 +844,10 @@
         return null;
     }
 
-    // =====================================================================
-    //  Export Public API
-    // =====================================================================
-
+    // Export Public API
     FileFlow.notebookLM = {
+        scanProjects,
+        showVcxprojPreviewModal,
         exportForNotebookLM,
         getExportConfig,
         getDefaultExtensionsString,

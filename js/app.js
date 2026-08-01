@@ -227,10 +227,10 @@
             catch (e) { console.error(e); Status.error('CSV creation failed'); }
         });
 
-        // NotebookLM Export
+        // NotebookLM Export (Preview & Export)
         $('export-notebooklm-btn').addEventListener('click', async () => {
-            try { await FileFlow.notebookLM.exportForNotebookLM(); }
-            catch (e) { console.error(e); Status.error('NotebookLM export failed: ' + e.message); }
+            try { await FileFlow.notebookLM.showVcxprojPreviewModal(); }
+            catch (e) { console.error(e); Status.error('Failed to open VS Projects preview: ' + e.message); }
         });
 
         // Stats

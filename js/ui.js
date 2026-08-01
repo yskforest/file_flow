@@ -83,6 +83,7 @@
                 </div>
             </div>`);
         createModal('stats-modal', 'Statistics', '<div id="stats-content"></div>');
+        createModal('vcxproj-modal', 'Visual Studio Projects & LLM Export Preview', '<div id="vcxproj-preview-content"></div>');
     }
 
     // =====================
@@ -573,6 +574,321 @@
     }
 
     // =====================
+    //  LLM Export & Preview Modal
+    // =====================
+
+    const VcxprojPreview = {
+        show(data) {
+            const container = $('vcxproj-preview-content');
+            if (!container) return;
+
+            const { projects, fileItems, totalSizeBytes } = data;
+            const config = FileFlow.notebookLM.getExportConfig();
+
+            // Default state
+            let currentMode = projects.length > 0 ? 'vcxproj' : 'folder_structure';
+            let currentExt = config.ext || '.md';
+            let currentPartSizeMB = config.maxPartSizeBytes
+                ? config.maxPartSizeBytes / (1024 * 1024)
+                : 4;
+
+            // Render container shell
+            container.innerHTML = `
+                <div class="export-options-bar">
+                    <div class="option-section">
+                        <label class="option-label">解析モード (Export Mode)</label>
+                        <div class="segmented-control" id="export-mode-toggle">
+                            <button type="button" class="segment-btn ${currentMode === 'vcxproj' ? 'active' : ''}" data-mode="vcxproj" ${projects.length === 0 ? 'disabled title="vcxprojファイルが検出されませんでした"' : ''}>
+                                📦 vcxproj モード ${projects.length > 0 ? `(${projects.length})` : ''}
+                            </button>
+                            <button type="button" class="segment-btn ${currentMode === 'folder_structure' ? 'active' : ''}" data-mode="folder_structure">
+                                📁 フォルダ構造モード
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="option-section">
+                        <label class="option-label">出力拡張子 (Format)</label>
+                        <div class="segmented-control" id="export-ext-toggle">
+                            <button type="button" class="segment-btn ${currentExt === '.md' ? 'active' : ''}" data-ext=".md">.md (OKF Markdown)</button>
+                            <button type="button" class="segment-btn ${currentExt === '.txt' ? 'active' : ''}" data-ext=".txt">.txt (Text)</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="export-size-bar">
+                    <label class="option-label">ファイル分割サイズ (Part Size Limit)</label>
+                    <div class="size-presets">
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 1 ? 'active' : ''}" data-mb="1">1 MB</button>
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 2 ? 'active' : ''}" data-mb="2">2 MB</button>
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 4 ? 'active' : ''}" data-mb="4">4 MB (NotebookLM)</button>
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 8 ? 'active' : ''}" data-mb="8">8 MB</button>
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 16 ? 'active' : ''}" data-mb="16">16 MB</button>
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 0 ? 'active' : ''}" data-mb="0">分割なし (一括)</button>
+                        <div class="custom-size-wrapper">
+                            <input type="number" id="custom-part-mb-input" class="custom-mb-input" placeholder="カスタム" min="1" max="500" value="${[1,2,4,8,16,0].includes(currentPartSizeMB) ? '' : currentPartSizeMB}">
+                            <span class="mb-unit">MB</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-summary vcxproj-summary">
+                    <div class="stat-box">
+                        <div class="label">選択モード</div>
+                        <div class="value" id="preview-mode-name" style="font-size:0.95rem;color:var(--accent-color)">
+                            ${currentMode === 'vcxproj' ? 'vcxproj (VS Proj)' : 'フォルダ構造'}
+                        </div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="label">対象ファイル</div>
+                        <div class="value" id="preview-file-count">${fileItems.length.toLocaleString()}</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="label">元データ容量</div>
+                        <div class="value" id="preview-total-size">${formatBytes(totalSizeBytes)}</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="label">推定出力ファイル数</div>
+                        <div class="value" id="preview-parts-count">1</div>
+                    </div>
+                </div>
+
+                <div id="export-mode-view-container"></div>
+
+                <div class="modal-actions-footer">
+                    <button class="text-btn outline" id="vcxproj-cancel-btn">Cancel</button>
+                    <button class="text-btn notebooklm-btn" id="vcxproj-execute-btn">Execute Export for LLM</button>
+                </div>`;
+
+            const modal = $('vcxproj-modal');
+            modal.classList.remove('hidden');
+
+            // --- Inner Render Function ---
+            const updatePreview = () => {
+                const partsCountEl = modal.querySelector('#preview-parts-count');
+                const modeNameEl = modal.querySelector('#preview-mode-name');
+                const viewContainer = modal.querySelector('#export-mode-view-container');
+
+                modeNameEl.textContent = currentMode === 'vcxproj' ? 'vcxproj (VS Proj)' : 'フォルダ構造';
+
+                // Recalculate parts count
+                const partSizeBytes = currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : Infinity;
+                const estParts = (currentPartSizeMB === 0 || partSizeBytes === Infinity)
+                    ? 1
+                    : Math.max(1, Math.ceil(totalSizeBytes / partSizeBytes));
+
+                partsCountEl.textContent = estParts > 1 ? `${estParts} ファイル (.zip)` : `1 ファイル`;
+
+                // Render mode content view
+                if (currentMode === 'vcxproj') {
+                    let projectListHTML = '';
+                    if (projects.length === 0) {
+                        projectListHTML = `
+                            <div class="empty-vcxproj-notice">
+                                <p>No Visual Studio (.vcxproj) project files detected in the loaded folder.</p>
+                                <p class="sub-text">Switch to <strong>フォルダ構造モード</strong> above to export using disk directory structure.</p>
+                            </div>`;
+                    } else {
+                        projectListHTML = projects.map(p => {
+                            const srcCount = p.sourceFiles.length;
+                            const hdrCount = p.headerFiles.length;
+                            const resCount = p.resourceFiles.length;
+                            const configs = p.configurations.length ? p.configurations.join(', ') : 'Default';
+
+                            const definesBadges = p.defines.slice(0, 10).map(d =>
+                                `<span class="tag-badge define-tag" title="${d}">${d}</span>`
+                            ).join('') + (p.defines.length > 10 ? `<span class="tag-badge define-tag">+${p.defines.length - 10} more</span>` : '');
+
+                            const includeBadges = p.includeDirs.slice(0, 5).map(inc =>
+                                `<span class="tag-badge inc-tag" title="${inc}">${inc}</span>`
+                            ).join('') + (p.includeDirs.length > 5 ? `<span class="tag-badge inc-tag">+${p.includeDirs.length - 5} more</span>` : '');
+
+                            return `
+                                <div class="vcxproj-card">
+                                    <div class="vcxproj-card-header">
+                                        <label class="vcxproj-checkbox-label">
+                                            <input type="checkbox" class="vcxproj-select-cb" data-proj-name="${p.name}" checked>
+                                            <span class="vcxproj-name">${p.name}.vcxproj</span>
+                                        </label>
+                                        <span class="vcxproj-path" title="${p.path}">${p.path}</span>
+                                    </div>
+                                    <div class="vcxproj-card-body">
+                                        <div class="vcxproj-stat-row">
+                                            <span class="vstat"><strong>Sources:</strong> ${srcCount}</span>
+                                            <span class="vstat"><strong>Headers:</strong> ${hdrCount}</span>
+                                            <span class="vstat"><strong>Resources:</strong> ${resCount}</span>
+                                            <span class="vstat"><strong>Configs:</strong> ${configs}</span>
+                                        </div>
+                                        ${p.defines.length ? `<div class="vcxproj-tags-row"><span class="tags-label">Defines:</span> <div class="tags-wrapper">${definesBadges}</div></div>` : ''}
+                                        ${p.includeDirs.length ? `<div class="vcxproj-tags-row"><span class="tags-label">Includes:</span> <div class="tags-wrapper">${includeBadges}</div></div>` : ''}
+                                    </div>
+                                </div>`;
+                        }).join('');
+                    }
+
+                    viewContainer.innerHTML = `
+                        <div class="vcxproj-list-container">
+                            <div class="vcxproj-list-header">
+                                <h4>Visual Studio Projects (${projects.length})</h4>
+                                ${projects.length > 0 ? `
+                                <div class="vcxproj-bulk-actions">
+                                    <a href="#" id="vcxproj-select-all">Select All</a> | 
+                                    <a href="#" id="vcxproj-clear-all">Clear All</a>
+                                </div>` : ''}
+                            </div>
+                            <div class="vcxproj-cards-scroll">
+                                ${projectListHTML}
+                            </div>
+                        </div>`;
+
+                    const selectAllBtn = viewContainer.querySelector('#vcxproj-select-all');
+                    const clearAllBtn = viewContainer.querySelector('#vcxproj-clear-all');
+                    if (selectAllBtn) {
+                        selectAllBtn.addEventListener('click', e => {
+                            e.preventDefault();
+                            viewContainer.querySelectorAll('.vcxproj-select-cb').forEach(cb => cb.checked = true);
+                        });
+                    }
+                    if (clearAllBtn) {
+                        clearAllBtn.addEventListener('click', e => {
+                            e.preventDefault();
+                            viewContainer.querySelectorAll('.vcxproj-select-cb').forEach(cb => cb.checked = false);
+                        });
+                    }
+
+                } else {
+                    // Folder structure view
+                    viewContainer.innerHTML = `
+                        <div class="folder-structure-preview-box">
+                            <div class="folder-preview-header">
+                                <h4>📁 Physical Folder Structure Overview (OKF Format)</h4>
+                                <span class="folder-preview-note">OKF Frontmatter &amp; ASCII Tree will be automatically prepended to the exported ${currentExt} files.</span>
+                            </div>
+                            <div class="folder-tree-box">
+                                <pre class="ascii-tree-preview">${_buildTreeSnippet(fileItems)}</pre>
+                            </div>
+                        </div>`;
+                }
+            };
+
+            // Initial render
+            updatePreview();
+
+            // --- Event Listeners ---
+            modal.querySelector('#vcxproj-cancel-btn').addEventListener('click', () => modal.classList.add('hidden'));
+
+            // Mode switch
+            modal.querySelectorAll('#export-mode-toggle .segment-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    if (btn.hasAttribute('disabled')) return;
+                    modal.querySelectorAll('#export-mode-toggle .segment-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentMode = btn.getAttribute('data-mode');
+                    updatePreview();
+                });
+            });
+
+            // Ext switch
+            modal.querySelectorAll('#export-ext-toggle .segment-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    modal.querySelectorAll('#export-ext-toggle .segment-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentExt = btn.getAttribute('data-ext');
+                    updatePreview();
+                });
+            });
+
+            // Size presets
+            modal.querySelectorAll('.size-preset-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    modal.querySelectorAll('.size-preset-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentPartSizeMB = parseFloat(btn.getAttribute('data-mb'));
+                    const customInput = modal.querySelector('#custom-part-mb-input');
+                    if (customInput) customInput.value = '';
+                    updatePreview();
+                });
+            });
+
+            // Custom MB input
+            const customInput = modal.querySelector('#custom-part-mb-input');
+            if (customInput) {
+                customInput.addEventListener('input', () => {
+                    const val = parseFloat(customInput.value);
+                    if (!isNaN(val) && val > 0) {
+                        modal.querySelectorAll('.size-preset-btn').forEach(b => b.classList.remove('active'));
+                        currentPartSizeMB = val;
+                        updatePreview();
+                    }
+                });
+            }
+
+            // Execute export button
+            modal.querySelector('#vcxproj-execute-btn').addEventListener('click', async () => {
+                const selectedCbs = [...modal.querySelectorAll('.vcxproj-select-cb:checked')];
+                const selectedNames = (currentMode === 'vcxproj' && projects.length > 0)
+                    ? selectedCbs.map(cb => cb.getAttribute('data-proj-name'))
+                    : null;
+
+                modal.classList.add('hidden');
+                try {
+                    await FileFlow.notebookLM.exportForNotebookLM({
+                        selectedProjectNames,
+                        mode: currentMode,
+                        ext: currentExt,
+                        maxPartSizeBytes: currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : 0
+                    });
+                } catch (err) {
+                    console.error('Export error:', err);
+                    Status.error('Export failed: ' + err.message);
+                }
+            });
+        }
+    };
+
+    function _buildTreeSnippet(fileItems) {
+        const root = {};
+        for (const item of fileItems.slice(0, 80)) { // limit preview
+            const parts = item.relativePath.split('/');
+            let curr = root;
+            for (let i = 0; i < parts.length; i++) {
+                const part = parts[i];
+                const isFile = (i === parts.length - 1);
+                if (!curr[part]) {
+                    curr[part] = isFile ? null : {};
+                }
+                if (!isFile) curr = curr[part];
+            }
+        }
+
+        const lines = [];
+        function formatTree(node, prefix = '', depth = 1) {
+            if (depth > 3) {
+                lines.push(prefix + '└── ...');
+                return;
+            }
+            const keys = Object.keys(node).sort((a, b) => {
+                const aIsDir = node[a] !== null;
+                const bIsDir = node[b] !== null;
+                if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+                return a.localeCompare(b);
+            });
+            for (let i = 0; i < keys.length; i++) {
+                const key = keys[i];
+                const isLast = (i === keys.length - 1);
+                const isDir = node[key] !== null;
+                lines.push(prefix + (isLast ? '└── ' : '├── ') + key + (isDir ? '/' : ''));
+                if (isDir) {
+                    formatTree(node[key], prefix + (isLast ? '    ' : '│   '), depth + 1);
+                }
+            }
+        }
+        formatTree(root, '', 1);
+        if (fileItems.length > 80) lines.push('└── ... (total ' + fileItems.length + ' files)');
+        return lines.join('\n');
+    }
+
+    // =====================
     //  Export
     // =====================
 
@@ -588,4 +904,5 @@
             $('stats-modal').classList.remove('hidden');
         }
     };
+    FileFlow.ui.VcxprojPreview = VcxprojPreview;
 })();

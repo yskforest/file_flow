@@ -168,6 +168,17 @@ python -m http.server 8080
 - **メタデータキャッシュ** — `entryMetadata` にファイルサイズ・日時・エンコーディング情報をキャッシュし、再描画時のファイル再読み込みを回避。
 - **デバウンス** — フィルタ入力は 300ms のデバウンスでリアルタイム反映。
 
+### LLM エクスポート (NotebookLM Export)
+
+ツールバーの `Export for LLM` ボタンから起動します。1,000万行規模の Visual Studio プロジェクトのソースコードを LLM（NotebookLM等）へ投入可能な統合テキストに変換・分割エクスポートします。
+
+- **vcxproj 自動解析**: `vcxproj` や `vcxproj.filters` からプロジェクト名、ビルド構成、プリプロセッサ定義、インクルードパス、フィルタ（仮想フォルダ）情報を自動抽出。
+- **事前一覧確認モーダル**: エクスポート前に検出された `vcxproj` のビルド定義一覧・ファイル件数をカード形式で事前プレビュー確認し、対象プロジェクトを個別に選択可能。
+- **トークン最適化 & 4MB分割**: ヘッダー構成をコンパクト化し、入力上限4MBごとに自動分割（ファイル境界で切断）。
+- **メタデータ CSV 同梱**: 統合テキストファイル群に加えて `vcxproj_list.csv` （プロジェクト定義一覧）および `target_files_list.csv` （対象ファイル明細）が ZIP に同梱されます。
+
+詳しいフォーマット仕様については [docs/export_format.md](file:///x:/code/file_flow/docs/export_format.md) を参照してください。
+
 ---
 
 ## 設計 (Architecture)
@@ -181,18 +192,21 @@ HTML はスケルトンのみ保持し、SVG アイコンとモーダルは JS �
 ```
 
 ```
-index.html          … スケルトン HTML (62行)
-style.css           … 全スタイル定義 (CSS Variables ダークテーマ)
+index.html              … スケルトン HTML
+style.css               … 全スタイル定義 (CSS Variables ダークテーマ)
 docs/
-└── requirements.md … プロジェクト要件定義書（要件・制約・仕様・受入条件等）
+├── requirements.md     … プロジェクト要件定義書
+├── export_format.md    … NotebookLM統合テキスト & CSV 出力仕様書
+└── ai_format_guide.md  … 統合テキスト & CSV フォーマット解釈リファレンス書
 js/
-├── utils.js        … 名前空間定義 + ユーティリティ群 + アイコンヘルパー
-├── actions.js      … アクション基底クラス + レジストリ + 全アクション
-├── ui.js           … UI 描画 / モーダル生成 / フィルタ / ステータス / 統計
-└── app.js          … エントリーポイント (イベントバインド + オーケストレーション)
+├── utils.js            … 名前空間定義 + ユーティリティ群 + アイコンヘルパー
+├── actions.js          … アクション基底クラス + レジストリ + 全アクション
+├── ui.js               … UI 描画 / モーダル生成 / フィルタ / ステータス / 統計
+├── export-notebooklm.js … vcxproj解析 / 統合テキスト & CSVエクスポート / プレビュー
+└── app.js              … エントリーポイント (イベントバインド + オーケストレーション)
 lib/
-└── jszip.min.js    … JSZip ライブラリ (setup.sh でダウンロード)
-setup.sh            … 初回セットアップスクリプト
+└── jszip.min.js        … JSZip ライブラリ (setup.sh でダウンロード)
+setup.sh                … 初回セットアップスクリプト
 ```
 
 ### 名前空間 (`window.FileFlow`)
