@@ -253,7 +253,7 @@
                     entryPoints
                 });
 
-                // Header & Directory Tree & Global Index
+                // Header & Directory Tree & Compact Index
                 const header = this._buildOKFHeader({
                     rootName,
                     partNum,
@@ -262,7 +262,8 @@
                     projects,
                     directoryTree,
                     allFilesIndex,
-                    currentPartFiles: partFiles
+                    currentPartFiles: partFiles,
+                    partFileList
                 });
 
                 const body = parts[p].lines.join('');
@@ -276,7 +277,7 @@
                 });
             }
 
-            return results;
+            return { results, partFileList };
         },
 
         // --- OKF Format Building Helpers ---
@@ -305,12 +306,13 @@
             return lines.join('\n');
         },
 
-        _buildOKFHeader({ rootName, partNum, totalParts, mode, projects, directoryTree, allFilesIndex, currentPartFiles }) {
+        _buildOKFHeader({ rootName, partNum, totalParts, mode, projects, directoryTree, allFilesIndex, currentPartFiles, partFileList }) {
             const lines = [];
             lines.push(`# Project Overview & Structure`);
             lines.push(`- **Root Workspace**: \`${rootName}\``);
             lines.push(`- **Export Mode**: \`${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'}\``);
-            lines.push(`- **Total Project Files**: ${allFilesIndex.length} | **Files in Part ${partNum}/${totalParts}**: ${currentPartFiles.length}\n`);
+            lines.push(`- **Total Project Files**: ${allFilesIndex.length} | **Files in Part ${partNum}/${totalParts}**: ${currentPartFiles.length}`);
+            lines.push(`- **Note**: See \`index.md\` for the complete codebase index with all directories, files, and part mapping.\n`);
 
             if (mode === 'vcxproj' && projects && projects.length > 0) {
                 lines.push(`## Build Units (Visual Studio Projects)`);
@@ -333,18 +335,43 @@
                 lines.push('');
             }
 
-            lines.push(`## Global File Index (Part ${partNum} of ${totalParts})`);
-            const currentPaths = new Set(currentPartFiles.map(f => f.path));
-
-            for (const item of allFilesIndex) {
-                const isCurrent = currentPaths.has(item.path);
-                const mark = isCurrent ? '[x]' : '[ ]';
-                const projInfo = item.project ? ` [${item.project}]` : '';
-                const fltInfo = item.filter ? ` (${item.filter})` : '';
-                const status = isCurrent ? '(This Part)' : '';
-                lines.push(`${mark} ${item.num}. \`${item.path}\`${projInfo}${fltInfo} ${status}`.trim());
+            // Compact File Index: only current part files in detail
+            lines.push(`## File Index — Part ${partNum} of ${totalParts}`);
+            lines.push('');
+            lines.push('| # | Path | Size |');
+            lines.push('|---|---|---|');
+            for (const f of currentPartFiles) {
+                const projTag = f.project ? ` [${f.project}]` : '';
+                lines.push(`| ${f.globalIndex} | \`${f.path}\`${projTag} | ${formatBytes(f.size)} |`);
             }
-            lines.push('', '---', '', '# Source Code Section', '');
+            lines.push('');
+
+            // Cross-reference: directory-level summary of other parts
+            if (totalParts > 1 && partFileList) {
+                lines.push(`## Other Parts — Directory Summary`);
+                lines.push('');
+                lines.push('| Part | Files | Primary Directories |');
+                lines.push('|---|---|---|');
+                for (let i = 0; i < partFileList.length; i++) {
+                    if (i === partNum - 1) continue; // skip current part
+                    const pFiles = partFileList[i];
+                    const dirCounts = new Map();
+                    for (const f of pFiles) {
+                        const dir = f.path.includes('/') ? f.path.replace(/\/[^/]+$/, '') : '.';
+                        dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
+                    }
+                    // Top directories by file count
+                    const topDirs = [...dirCounts.entries()]
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 5)
+                        .map(([d, c]) => `\`${d}/\` (${c})`)
+                        .join(', ');
+                    lines.push(`| ${i + 1} | ${pFiles.length} | ${topDirs} |`);
+                }
+                lines.push('');
+            }
+
+            lines.push('---', '', '# Source Code Section', '');
 
             return lines.join('\n');
         },
@@ -410,7 +437,7 @@
     async function scanProjects() {
         const roots = State.currentRootEntries;
         if (!roots.length) {
-            return { projects: [], fileItems: [], totalSizeBytes: 0 };
+            return { projects: [], fileItems: [], allFilesInfo: [], totalSizeBytes: 0 };
         }
 
         const config = getExportConfig();
@@ -474,20 +501,18 @@
         }
 
         const fileItems = [];
+        const allFilesInfo = [];  // All files including binaries (for index.md)
         let totalSizeBytes = 0;
         const isSingleRoot = roots.length === 1 && roots[0].isDirectory;
         const rootPrefix = isSingleRoot ? roots[0].fullPath : '';
 
         for (const entry of allFileEntries) {
             const ext = _getExtension(entry.name);
-            if (!config.sourceExtensions.has(ext)) continue;
+            const isSourceTarget = config.sourceExtensions.has(ext);
 
             const relativePath = rootPrefix
                 ? entry.fullPath.replace(rootPrefix + '/', '').replace(rootPrefix, '')
                 : entry.fullPath.replace(/^\//, '');
-
-            const normalizedPath = _normalizePath(entry.fullPath);
-            const projRef = projectFileMap.get(normalizedPath) || _fuzzyMatchProject(entry, projectFileMap);
 
             let fileSize = 0;
             const meta = State.entryMetadata[entry.fullPath];
@@ -499,6 +524,19 @@
                     fileSize = file.size;
                 } catch { /* ignore */ }
             }
+
+            // Collect all files for index.md
+            allFilesInfo.push({
+                relativePath,
+                size: fileSize,
+                extension: ext,
+                isExportTarget: isSourceTarget
+            });
+
+            if (!isSourceTarget) continue;
+
+            const normalizedPath = _normalizePath(entry.fullPath);
+            const projRef = projectFileMap.get(normalizedPath) || _fuzzyMatchProject(entry, projectFileMap);
 
             totalSizeBytes += fileSize;
 
@@ -513,8 +551,9 @@
 
         // Default sort: path-based for folder structure consistency
         fileItems.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+        allFilesInfo.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
-        return { projects, fileItems, totalSizeBytes };
+        return { projects, fileItems, allFilesInfo, totalSizeBytes };
     }
 
     async function showVcxprojPreviewModal() {
@@ -563,7 +602,7 @@
         Status.show('Preparing export data...', true);
         await new Promise(r => setTimeout(r, 20));
 
-        const { projects, fileItems: allItems } = await scanProjects();
+        const { projects, fileItems: allItems, allFilesInfo } = await scanProjects();
 
         let targetProjects = projects;
         let fileItems = allItems;
@@ -591,7 +630,7 @@
 
         Status.show(`Consolidating ${fileItems.length.toLocaleString()} files (OKF Markdown)...`, true);
 
-        const results = await SourceConsolidator.consolidate({
+        const { results, partFileList } = await SourceConsolidator.consolidate({
             fileItems,
             projects: targetProjects,
             mode,
@@ -601,6 +640,14 @@
             onProgress(done, total) {
                 Status.show(`Processing files... (${done.toLocaleString()} / ${total.toLocaleString()})`, true);
             }
+        });
+
+        // Generate index.md (OKF codebase index)
+        Status.show('Generating index.md...', true);
+        const rootName = roots.length === 1 ? roots[0].name : 'project';
+        const indexMdBlob = _generateIndexMd({
+            rootName, mode, ext, allFilesInfo, fileItems,
+            results, partFileList, projects: targetProjects
         });
 
         // Generate CSV files based on mode
@@ -616,11 +663,11 @@
             secondaryCsvName = 'folder_structure.csv';
         }
 
-        Status.show(`Creating ZIP package with ${results.length} file(s) and metadata CSVs...`, true);
-        const rootName = roots.length === 1 ? roots[0].name : 'project';
+        Status.show(`Creating ZIP package with ${results.length} file(s), index.md, and metadata CSVs...`, true);
 
         try {
             const zip = new JSZip();
+            zip.file('index.md', indexMdBlob);
             for (const r of results) {
                 zip.file(r.filename, r.blob);
             }
@@ -629,9 +676,11 @@
 
             const zipBlob = await zip.generateAsync({ type: 'blob' });
             downloadBlob(zipBlob, `${rootName}_notebooklm_export.zip`);
-            Status.show(`Exported ZIP containing ${results.length} part(s) + 2 CSVs (${formatBytes(zipBlob.size)})`);
+            Status.show(`Exported ZIP: index.md + ${results.length} part(s) + 2 CSVs (${formatBytes(zipBlob.size)})`);
         } catch (e) {
             console.warn('ZIP creation failed, downloading files individually:', e);
+            downloadBlob(indexMdBlob, 'index.md');
+            await new Promise(res => setTimeout(res, 300));
             for (const r of results) {
                 downloadBlob(r.blob, r.filename);
                 await new Promise(res => setTimeout(res, 300));
@@ -639,7 +688,7 @@
             downloadBlob(secondaryCsvBlob, secondaryCsvName);
             await new Promise(res => setTimeout(res, 300));
             downloadBlob(targetFilesCsvBlob, 'target_files_list.csv');
-            Status.show(`Exported ${results.length + 2} files individually`);
+            Status.show(`Exported ${results.length + 3} files individually`);
         }
     }
 
@@ -715,6 +764,174 @@
 
         const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
         return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+    }
+
+    // =====================================================================
+    //  index.md Generator — OKF Codebase Index for LLM
+    // =====================================================================
+
+    /**
+     * Generate an OKF-compliant index.md that serves as the master table of contents.
+     * Optimized for LLM analysis: directory-level aggregation + per-part mapping + full file list.
+     */
+    function _generateIndexMd({ rootName, mode, ext, allFilesInfo, fileItems, results, partFileList, projects }) {
+        const totalFiles = allFilesInfo.length;
+        const exportedFiles = allFilesInfo.filter(f => f.isExportTarget).length;
+        const binaryFiles = totalFiles - exportedFiles;
+        const totalSizeBytes = allFilesInfo.reduce((sum, f) => sum + f.size, 0);
+        const exportedSizeBytes = fileItems.reduce((sum, f) => sum + f.size, 0);
+        const totalParts = results.length;
+        const cleanExt = ext.startsWith('.') ? ext : '.' + ext;
+
+        // Build directory stats
+        const dirStats = new Map();
+        for (const f of allFilesInfo) {
+            const dir = f.relativePath.includes('/') ? f.relativePath.replace(/\/[^/]+$/, '') : '.';
+            if (!dirStats.has(dir)) {
+                dirStats.set(dir, { files: 0, exported: 0, binary: 0, size: 0 });
+            }
+            const s = dirStats.get(dir);
+            s.files++;
+            s.size += f.size;
+            if (f.isExportTarget) s.exported++;
+            else s.binary++;
+        }
+
+        // Build file-to-part mapping
+        const filePartMap = new Map();
+        if (partFileList) {
+            for (let i = 0; i < partFileList.length; i++) {
+                for (const f of partFileList[i]) {
+                    filePartMap.set(f.path, i + 1);
+                }
+            }
+        }
+
+        // --- OKF YAML Frontmatter ---
+        const lines = [
+            '---',
+            'type: codebase_index',
+            'format_version: "1.0-okf"',
+            `title: "${rootName} — Codebase Index"`,
+            'description: "Complete directory and file index for LLM codebase analysis. Load this file first for structural context."',
+            `export_mode: "${mode}"`,
+            `total_files: ${totalFiles}`,
+            `total_directories: ${dirStats.size}`,
+            `total_size_bytes: ${totalSizeBytes}`,
+            `exported_text_files: ${exportedFiles}`,
+            `non_exported_files: ${binaryFiles}`,
+            `export_parts: ${totalParts}`,
+            `generated_at: "${new Date().toISOString()}"`,
+            '---',
+            ''
+        ];
+
+        // --- Summary ---
+        lines.push(`# ${rootName} — Codebase Index`);
+        lines.push('');
+        lines.push('> **Load this file first.** It provides the complete structural overview of the exported codebase.');
+        lines.push('> Other exported part files (`*_src_*${cleanExt}`) contain the actual source code.');
+        lines.push('');
+        lines.push('## Export Summary');
+        lines.push('');
+        lines.push('| Metric | Value |');
+        lines.push('|---|---|');
+        lines.push(`| Root Workspace | \`${rootName}\` |`);
+        lines.push(`| Export Mode | ${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'} |`);
+        lines.push(`| Total Files | ${totalFiles.toLocaleString()} |`);
+        lines.push(`| Exported (Text) Files | ${exportedFiles.toLocaleString()} |`);
+        lines.push(`| Non-Exported Files | ${binaryFiles.toLocaleString()} |`);
+        lines.push(`| Total Size | ${formatBytes(totalSizeBytes)} |`);
+        lines.push(`| Exported Size | ${formatBytes(exportedSizeBytes)} |`);
+        lines.push(`| Export Parts | ${totalParts} file(s) |`);
+        lines.push('');
+
+        // --- Build Units (vcxproj mode) ---
+        if (mode === 'vcxproj' && projects && projects.length > 0) {
+            lines.push('## Build Units (Visual Studio Projects)');
+            lines.push('');
+            lines.push('| Project | Sources | Headers | Resources | Configs |');
+            lines.push('|---|---|---|---|---|');
+            for (const p of projects) {
+                const configs = p.configurations.length ? p.configurations.join(', ') : 'Default';
+                lines.push(`| \`${p.name}\` | ${p.sourceFiles.length} | ${p.headerFiles.length} | ${p.resourceFiles.length} | ${configs} |`);
+            }
+            lines.push('');
+
+            // Defines & Includes (compact)
+            for (const p of projects) {
+                if (p.defines.length || p.includeDirs.length) {
+                    lines.push(`### ${p.name}`);
+                    if (p.defines.length) {
+                        lines.push(`- **Defines**: \`${p.defines.join('; ')}\``);
+                    }
+                    if (p.includeDirs.length) {
+                        lines.push(`- **Include Dirs**: \`${p.includeDirs.join('; ')}\``);
+                    }
+                    lines.push('');
+                }
+            }
+        }
+
+        // --- Directory Structure Table ---
+        lines.push('## Directory Structure');
+        lines.push('');
+        lines.push('| Directory | Files | Exported | Non-Exported | Size |');
+        lines.push('|---|---|---|---|---|');
+
+        const sortedDirs = [...dirStats.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+        for (const [dir, s] of sortedDirs) {
+            lines.push(`| \`${dir}/\` | ${s.files} | ${s.exported} | ${s.binary} | ${formatBytes(s.size)} |`);
+        }
+        lines.push('');
+
+        // --- Export Parts Map ---
+        if (totalParts > 0) {
+            lines.push('## Export Parts Map');
+            lines.push('');
+            lines.push(`| Part | Filename | Files | Primary Directories |`);
+            lines.push('|---|---|---|---|');
+
+            for (let i = 0; i < partFileList.length; i++) {
+                const pFiles = partFileList[i];
+                const num = String(i + 1).padStart(3, '0');
+                const totalNum = String(totalParts).padStart(3, '0');
+                const filename = `${rootName}_src_${num}_of_${totalNum}${cleanExt}`;
+
+                // Aggregate directories
+                const dirCounts = new Map();
+                for (const f of pFiles) {
+                    const dir = f.path.includes('/') ? f.path.replace(/\/[^/]+$/, '') : '.';
+                    dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
+                }
+                const topDirs = [...dirCounts.entries()]
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 5)
+                    .map(([d, c]) => `\`${d}/\` (${c})`)
+                    .join(', ');
+
+                lines.push(`| ${i + 1} | \`${filename}\` | ${pFiles.length} | ${topDirs} |`);
+            }
+            lines.push('');
+        }
+
+        // --- Full File List ---
+        lines.push('## All Files');
+        lines.push('');
+        lines.push('| # | Path | Size | Type | Part |');
+        lines.push('|---|---|---|---|---|');
+
+        for (let i = 0; i < allFilesInfo.length; i++) {
+            const f = allFilesInfo[i];
+            const type = f.isExportTarget ? 'text' : 'binary';
+            const part = filePartMap.get(f.relativePath);
+            const partStr = part ? String(part) : '—';
+            lines.push(`| ${i + 1} | \`${f.relativePath}\` | ${formatBytes(f.size)} | ${type} | ${partStr} |`);
+        }
+        lines.push('');
+
+        const mdText = lines.join('\n');
+        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), mdText], { type: 'text/markdown;charset=utf-8' });
     }
 
     // =====================================================================

@@ -23,6 +23,7 @@
 
 ```
 <root_name>_notebooklm_export.zip
+├── index.md                          # OKF コードベースインデックス（最初に読み込むべき全体目次）
 ├── <root_name>_src_001_of_003.md    # OKF 統合ソースコード Part 1 (拡張子: .md または .txt)
 ├── <root_name>_src_002_of_003.md    # OKF 統合ソースコード Part 2
 ├── <root_name>_src_003_of_003.md    # OKF 統合ソースコード Part 3
@@ -30,6 +31,8 @@
 ├── folder_structure.csv              # フォルダ構造モード時: ディレクトリ階層一覧
 └── target_files_list.csv             # 統合テキストに含まれる全対象ファイル一覧
 ```
+
+> **LLM投入順序**: `index.md` を最初のソースとしてアップロードし、その後にパートファイル（`*_src_*`）を追加してください。
 
 ---
 
@@ -58,13 +61,16 @@ entry_points:
 ---
 ```
 
-### 3.2 ヘッダーセクション（ディレクトリツリー ＆ グローバル目次）
+### 3.2 ヘッダーセクション（ディレクトリツリー ＆ コンパクト目次）
+
+スケーラビリティ最適化により、各パートのヘッダーには**当該パート内ファイルのみ**の詳細目次と、**他パートのディレクトリ単位要約**を掲載します。全体の完全なファイル一覧は `index.md` を参照してください。
 
 ```markdown
 # Project Overview & Structure
 - **Root Workspace**: `TestEngine`
 - **Export Mode**: `Visual Studio (vcxproj)`
 - **Total Project Files**: 420 | **Files in Part 1/3**: 142
+- **Note**: See `index.md` for the complete codebase index with all directories, files, and part mapping.
 
 ## Directory Tree Structure
 ```
@@ -77,10 +83,20 @@ entry_points:
     └── Engine.h
 ```
 
-## Global File Index (Part 1 of 3)
-- [x] 1. `src/main.cpp` [TestEngine] (This Part)
-- [x] 2. `src/core/Engine.cpp` [TestEngine] (This Part)
-- [ ] 143. `src/utils/Helper.cpp` (Part 2)
+## File Index — Part 1 of 3
+
+| # | Path | Size |
+|---|---|---|
+| 1 | `src/main.cpp` [TestEngine] | 2.3 KB |
+| 2 | `src/core/Engine.cpp` [TestEngine] | 14.9 KB |
+| ... | ... | ... |
+
+## Other Parts — Directory Summary
+
+| Part | Files | Primary Directories |
+|---|---|---|
+| 2 | 138 | `src/utils/` (45), `src/net/` (32), ... |
+| 3 | 140 | `include/` (89), `resources/` (51) |
 
 ---
 
@@ -148,9 +164,45 @@ namespace Core {
 
 ---
 
-## 5. NotebookLM への推薦利用手順
+## 5. `index.md` — OKF コードベースインデックス仕様
+
+`index.md` はエクスポート成果物の**マスター目次**として機能し、LLMが最初に読み込むべきファイルです。
+
+### 5.1 OKF YAML Frontmatter
+
+```yaml
+---
+type: codebase_index
+format_version: "1.0-okf"
+title: "ProjectName — Codebase Index"
+description: "Complete directory and file index for LLM codebase analysis. Load this file first for structural context."
+export_mode: "vcxproj"
+total_files: 30000
+total_directories: 1200
+total_size_bytes: 450000000
+exported_text_files: 28500
+non_exported_files: 1500
+export_parts: 12
+generated_at: "2026-08-01T12:00:00Z"
+---
+```
+
+### 5.2 セクション構成
+
+| セクション | 内容 |
+|---|---|
+| **Export Summary** | ルート名、モード、ファイル数、サイズ等のサマリテーブル |
+| **Build Units** | vcxprojモード時: プロジェクト別のファイル数・Defines・Include Dirs |
+| **Directory Structure** | 全ディレクトリの集約テーブル（ファイル数、エクスポート/非エクスポート、サイズ） |
+| **Export Parts Map** | 各パートファイル名、含まれるファイル数、主要ディレクトリの対応表 |
+| **All Files** | 全ファイル一覧テーブル（パス、サイズ、Type: text/binary、所属Part番号） |
+
+---
+
+## 6. NotebookLM への推薦利用手順
 
 1. エクスポートされた ZIP ファイルを解凍します。
 2. NotebookLM のソース追加画面を開きます。
-3. 生成された OKF 統合ファイル (`*_src_001_of_XXX.md` または `.txt`) をアップロードします。
-4. ディレクトリ構造やプロジェクト定義を確認したい場合は、同梱されている CSV ファイル (`vcxproj_list.csv` または `folder_structure.csv`) も追加ソースとして投入可能です。
+3. **`index.md` を最初のソースとしてアップロード**します（構造コンテキスト）。
+4. 生成された OKF 統合ファイル (`*_src_001_of_XXX.md` または `.txt`) を追加アップロードします。
+5. ディレクトリ構造やプロジェクト定義を確認したい場合は、同梱されている CSV ファイル (`vcxproj_list.csv` または `folder_structure.csv`) も追加ソースとして投入可能です。

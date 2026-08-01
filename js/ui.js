@@ -833,7 +833,7 @@
                 modal.classList.add('hidden');
                 try {
                     await FileFlow.notebookLM.exportForNotebookLM({
-                        selectedProjectNames,
+                        selectedProjectNames: selectedNames,
                         mode: currentMode,
                         ext: currentExt,
                         maxPartSizeBytes: currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : 0
