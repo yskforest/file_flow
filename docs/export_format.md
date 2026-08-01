@@ -61,27 +61,16 @@ entry_points:
 ---
 ```
 
-### 3.2 ヘッダーセクション（ディレクトリツリー ＆ コンパクト目次）
+### 3.2 ヘッダーセクション（当パートファイル目次 ＆ index.md 参照）
 
-スケーラビリティ最適化により、各パートのヘッダーには**当該パート内ファイルのみ**の詳細目次と、**他パートのディレクトリ単位要約**を掲載します。全体の完全なファイル一覧は `index.md` を参照してください。
+トークン効率とスケーラビリティを最大化するため、全体のディレクトリ構造および他パートのサマリはすべて `index.md` に集約しています。各パートファイルのヘッダーには、概要・ビルド定義・**当パートに含まれるファイルの一覧目次**のみがコンパクトに掲載されます。
 
 ```markdown
 # Project Overview & Structure
 - **Root Workspace**: `TestEngine`
 - **Export Mode**: `Visual Studio (vcxproj)`
 - **Total Project Files**: 420 | **Files in Part 1/3**: 142
-- **Note**: See `index.md` for the complete codebase index with all directories, files, and part mapping.
-
-## Directory Tree Structure
-```
-├── src/
-│   ├── core/
-│   │   ├── Engine.cpp
-│   │   └── Parser.cpp
-│   └── main.cpp
-└── include/
-    └── Engine.h
-```
+- **Note**: See `index.md` for complete directory structure, all files index, and part mapping.
 
 ## File Index — Part 1 of 3
 
@@ -90,13 +79,6 @@ entry_points:
 | 1 | `src/main.cpp` [TestEngine] | 2.3 KB |
 | 2 | `src/core/Engine.cpp` [TestEngine] | 14.9 KB |
 | ... | ... | ... |
-
-## Other Parts — Directory Summary
-
-| Part | Files | Primary Directories |
-|---|---|---|
-| 2 | 138 | `src/utils/` (45), `src/net/` (32), ... |
-| 3 | 140 | `include/` (89), `resources/` (51) |
 
 ---
 

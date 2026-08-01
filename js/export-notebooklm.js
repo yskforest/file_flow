@@ -165,9 +165,8 @@
             const partFileList = [];
             let currentPartFiles = [];
 
-            // Detect entry points & build directory tree for headers
+            // Detect entry points for headers
             const entryPoints = _detectEntryPoints(fileItems);
-            const directoryTree = _buildDirectoryTree(fileItems, 4);
 
             // Process files
             for (let i = 0; i < fileItems.length; i++) {
@@ -253,17 +252,15 @@
                     entryPoints
                 });
 
-                // Header & Directory Tree & Compact Index
+                // Header & Compact Index
                 const header = this._buildOKFHeader({
                     rootName,
                     partNum,
                     totalParts,
                     mode,
                     projects,
-                    directoryTree,
                     allFilesIndex,
-                    currentPartFiles: partFiles,
-                    partFileList
+                    currentPartFiles: partFiles
                 });
 
                 const body = parts[p].lines.join('');
@@ -306,13 +303,13 @@
             return lines.join('\n');
         },
 
-        _buildOKFHeader({ rootName, partNum, totalParts, mode, projects, directoryTree, allFilesIndex, currentPartFiles, partFileList }) {
+        _buildOKFHeader({ rootName, partNum, totalParts, mode, projects, allFilesIndex, currentPartFiles }) {
             const lines = [];
             lines.push(`# Project Overview & Structure`);
             lines.push(`- **Root Workspace**: \`${rootName}\``);
             lines.push(`- **Export Mode**: \`${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'}\``);
             lines.push(`- **Total Project Files**: ${allFilesIndex.length} | **Files in Part ${partNum}/${totalParts}**: ${currentPartFiles.length}`);
-            lines.push(`- **Note**: See \`index.md\` for the complete codebase index with all directories, files, and part mapping.\n`);
+            lines.push(`- **Note**: See \`index.md\` for complete directory structure, all files index, and part mapping.\n`);
 
             if (mode === 'vcxproj' && projects && projects.length > 0) {
                 lines.push(`## Build Units (Visual Studio Projects)`);
@@ -327,14 +324,6 @@
                 }
             }
 
-            if (directoryTree) {
-                lines.push(`## Directory Tree Structure`);
-                lines.push('```');
-                lines.push(directoryTree);
-                lines.push('```');
-                lines.push('');
-            }
-
             // Compact File Index: only current part files in detail
             lines.push(`## File Index — Part ${partNum} of ${totalParts}`);
             lines.push('');
@@ -345,31 +334,6 @@
                 lines.push(`| ${f.globalIndex} | \`${f.path}\`${projTag} | ${formatBytes(f.size)} |`);
             }
             lines.push('');
-
-            // Cross-reference: directory-level summary of other parts
-            if (totalParts > 1 && partFileList) {
-                lines.push(`## Other Parts — Directory Summary`);
-                lines.push('');
-                lines.push('| Part | Files | Primary Directories |');
-                lines.push('|---|---|---|');
-                for (let i = 0; i < partFileList.length; i++) {
-                    if (i === partNum - 1) continue; // skip current part
-                    const pFiles = partFileList[i];
-                    const dirCounts = new Map();
-                    for (const f of pFiles) {
-                        const dir = f.path.includes('/') ? f.path.replace(/\/[^/]+$/, '') : '.';
-                        dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
-                    }
-                    // Top directories by file count
-                    const topDirs = [...dirCounts.entries()]
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 5)
-                        .map(([d, c]) => `\`${d}/\` (${c})`)
-                        .join(', ');
-                    lines.push(`| ${i + 1} | ${pFiles.length} | ${topDirs} |`);
-                }
-                lines.push('');
-            }
 
             lines.push('---', '', '# Source Code Section', '');
 
