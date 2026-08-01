@@ -370,7 +370,7 @@ main {
     border-radius: 1rem;
     padding: 1.5rem;
     width: 90%;
-    max-width: 400px;
+    max-width: 500px;
     box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
     max-height: 90vh;
     display: flex;
@@ -810,4 +810,70 @@ tr.gridjs-tr.gridjs-tr-selected .grid-filename {
 
 .filter-footer .outline:hover {
     background-color: rgba(255,255,255,0.05);
+}
+
+/* --- NotebookLM Export Button --- */
+.notebooklm-btn {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
+    color: #fff !important;
+    font-weight: 600;
+    border: none;
+    position: relative;
+    overflow: hidden;
+}
+
+.notebooklm-btn:hover {
+    background: linear-gradient(135deg, #818cf8, #a78bfa) !important;
+    box-shadow: 0 0 12px rgba(139, 92, 246, 0.4);
+}
+
+/* --- NLM Settings Controls --- */
+.setting-item-block {
+    margin-bottom: 0.8rem;
+    padding: 0.3rem 0.5rem;
+}
+
+.setting-label {
+    display: block;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.3rem;
+}
+
+.setting-input-sm {
+    background-color: var(--bg-color);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 0.35rem 0.6rem;
+    border-radius: 0.4rem;
+    font-size: 0.85rem;
+    width: 100px;
+    outline: none;
+    font-family: 'Consolas', 'Monaco', monospace;
+    transition: border-color 0.2s;
+}
+
+.setting-input-sm:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+}
+
+.setting-textarea {
+    background-color: var(--bg-color);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.4rem;
+    font-size: 0.78rem;
+    width: 100%;
+    outline: none;
+    font-family: 'Consolas', 'Monaco', monospace;
+    resize: vertical;
+    line-height: 1.4;
+    transition: border-color 0.2s;
+}
+
+.setting-textarea:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
 }

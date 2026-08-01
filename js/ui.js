@@ -66,6 +66,21 @@
                 <h4>Filters &amp; Display</h4>
                 <label class="setting-item"><input type="checkbox" id="exclude-dots-checkbox" checked><span>Exclude files/folders starting with "." (dotfiles)</span></label>
                 <label class="setting-item"><input type="checkbox" id="show-fullpath-checkbox" checked><span>Show full path in List View</span></label>
+            </div>
+            <div class="setting-group">
+                <h4>LLM Export Settings</h4>
+                <div class="setting-item-block">
+                    <label class="setting-label">Max part size (MB)</label>
+                    <input type="number" id="nlm-max-part-size" class="setting-input-sm" value="4" min="1" max="50" step="1">
+                </div>
+                <div class="setting-item-block">
+                    <label class="setting-label">Max single file size (MB)</label>
+                    <input type="number" id="nlm-max-file-size" class="setting-input-sm" value="1" min="0.1" max="10" step="0.1">
+                </div>
+                <div class="setting-item-block">
+                    <label class="setting-label">Target extensions (comma separated)</label>
+                    <textarea id="nlm-extensions" class="setting-textarea" rows="3"></textarea>
+                </div>
             </div>`);
         createModal('stats-modal', 'Statistics', '<div id="stats-content"></div>');
     }

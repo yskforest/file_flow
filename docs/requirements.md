@@ -42,6 +42,19 @@
    - スキャンした全ファイルの合計サイズ、ファイル/フォルダ数、無視されたドットファイル数、拡張子ごとの件数統計テーブルをモーダルで表示する。
 7. **設定管理 (Settings Modal)**
    - 「ドットファイル/フォルダの除外 (excludeDots)」「リストビューでのフルパス表示 (showFullPath)」などの設定情報を `localStorage` を介して自動永続化する。
+8. **NotebookLM向けソースコード統合エクスポート (LLM Export)**
+   - 大規模Visual Studioプロジェクト（1000万行規模）のソースコードを、LLM（NotebookLM等）が解析可能な統合テキストファイルとして出力する。
+   - **vcxproj/vcxproj.filters 自動検出・解析**: フォルダドロップ時に `.vcxproj` および `.vcxproj.filters` を自動検出し、XML解析により以下のビルド単位情報を抽出する:
+     - Configuration（Debug/Release等）、Platform
+     - PreprocessorDefinitions（プリプロセッサ定義）
+     - AdditionalIncludeDirectories（インクルードパス）
+     - ソースファイル（ClCompile）、ヘッダファイル（ClInclude）、リソースファイル（ResourceCompile）の分類
+     - フィルタ（仮想フォルダ）パス情報
+   - **ソースコード統合**: 対象拡張子のファイルをファイルパス・プロジェクト帰属・フィルタ情報のメタデータヘッダー付きで統合する。
+   - **サイズ分割**: 出力ファイルを設定可能な上限（デフォルト4MB）以下の単位で分割する。ファイル境界で切断し、同一プロジェクトのファイルをできるだけ同じパートにまとめる。
+   - **トークン効率**: LLMが解析精度を維持しつつ、トークン消費を最小化するコンパクトなフォーマットで出力する。
+   - **文字コード変換**: Shift_JIS、EUC-JP等の非UTF-8ファイルを可能な限りUTF-8に変換して出力する。
+   - **設定項目**: 対象拡張子、最大パートサイズ(MB)、最大単一ファイルサイズ(MB) を設定モーダルから変更可能。
 
 # 4. データ構造と状態 (Data Schema & State)
 アプリケーションがメモリ上で保持すべき状態（State）と、扱うデータのスキーマを定義する。
@@ -55,6 +68,10 @@
   - `actionMode` (string): `'md'` (Add .md) | `'txt'` (Add .txt) | `'detect'` (Detect Info)
   - `excludeDots` (boolean): ドットファイル/フォルダを除外するかどうかのフラグ
   - `showFullPath` (boolean): リストビューでファイルのフルパスを表示するかどうかのフラグ
+  - `notebookLMConfig` (object): LLMエクスポート設定
+    - `maxPartSizeMB` (number): 出力ファイルの最大サイズ（MB、デフォルト: 4）
+    - `maxSingleFileSizeMB` (number): 単一ファイルの最大サイズ（MB、デフォルト: 1）
+    - `sourceExtensions` (string): 対象拡張子のカンマ区切り文字列
 - `entryMetadata` (object): 各ファイルの `fullPath` をキーとするメタデータキャッシュ。スキャンサイズ、日付、検出された文字コード・改行コード、適用されたリネームファイル名などを保持する
 - `searchQuery` (string): ツールバーで入力された現在の検索フィルタキーワード
 
@@ -68,6 +85,10 @@ appSettings:
   actionMode: "md"       # アクション適用モード ('md' | 'txt' | 'detect')
   excludeDots: true      # ドットファイル/フォルダ除外フラグ (true/false)
   showFullPath: true     # リストビューでのフルパス表示フラグ (true/false)
+  notebookLMConfig:
+    maxPartSizeMB: 4           # 出力ファイルの最大サイズ（MB）
+    maxSingleFileSizeMB: 1     # 単一ファイルの最大サイズ（MB）
+    sourceExtensions: ".cpp, .h, .c, .hpp, .cs, ..."  # 対象拡張子
 
 # メモリ上で保持・蓄積されるファイルメタデータ (entryMetadata) の YAML 表現例
 entryMetadata:
@@ -98,6 +119,15 @@ entryMetadata:
 - **エクスポート機能**:
   - **ZIPダウンロード**: フィルタにより表示中のファイル群が、アクション適用後のファイル名および元のフォルダ構造を維持した状態で正しくZIPファイルとして生成・ダウンロードされること。
   - **CSVダウンロード**: リストビュー選択時に、現在のフィルタおよびソート状態に合わせた表データが、BOM付き UTF-8 CSV として正しくエクスポートされること。
+- **NotebookLM エクスポート機能**:
+  - 「Export for LLM」ボタン押下時に、対象拡張子のソースファイルが統合テキストファイルとして出力されること。
+  - vcxproj ファイルが検出された場合、ビルド単位情報（Configuration、Defines、IncludeDirs、ソース/ヘッダ分類、フィルタパス）が出力に含まれること。
+  - 各出力ファイルが設定された最大サイズ（デフォルト4MB）以下であること。
+  - ファイルの途中で切断されないこと（ファイル境界での分割）。
+  - 複数パートの場合はZIPにまとめてダウンロードされること。
+  - 各パートにファイルインデックス（目次）が含まれること。
+  - 非UTF-8ファイル（Shift_JIS等）が正しくUTF-8に変換されて出力されること。
 - **永続化と統計情報**:
   - 除外設定等の変更内容が `localStorage` に保存され、ページ再読み込み時にも状態が復元されること。
   - 統計情報モーダルに、全ファイルサイズ、総ファイル数/フォルダ数、無視された件数、および拡張子ごとの件数テーブルが正確に集計されて表示されること。
+

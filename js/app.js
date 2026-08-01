@@ -81,6 +81,15 @@
         if (fp) fp.checked = State.appSettings.showFullPath;
         const radio = document.querySelector(`input[name="action-mode"][value="${State.appSettings.actionMode}"]`);
         if (radio) radio.checked = true;
+
+        // Sync NLM export settings
+        const nlmCfg = State.appSettings.notebookLMConfig || {};
+        const nlmPartSize = $('nlm-max-part-size');
+        if (nlmPartSize) nlmPartSize.value = nlmCfg.maxPartSizeMB || 4;
+        const nlmFileSize = $('nlm-max-file-size');
+        if (nlmFileSize) nlmFileSize.value = nlmCfg.maxSingleFileSizeMB || 1;
+        const nlmExts = $('nlm-extensions');
+        if (nlmExts) nlmExts.value = nlmCfg.sourceExtensions || FileFlow.notebookLM.getDefaultExtensionsString();
     }
 
     function updateModeDisplay() {
@@ -146,6 +155,22 @@
         bindCheckbox('exclude-dots-checkbox', 'excludeDots');
         bindCheckbox('show-fullpath-checkbox', 'showFullPath');
 
+        // NLM Export settings change handlers
+        const saveNLMConfig = () => {
+            const cfg = State.appSettings.notebookLMConfig || {};
+            const partSize = $('nlm-max-part-size');
+            if (partSize) cfg.maxPartSizeMB = parseFloat(partSize.value) || 4;
+            const fileSize = $('nlm-max-file-size');
+            if (fileSize) cfg.maxSingleFileSizeMB = parseFloat(fileSize.value) || 1;
+            const exts = $('nlm-extensions');
+            if (exts) cfg.sourceExtensions = exts.value;
+            State.appSettings.notebookLMConfig = cfg;
+        };
+        ['nlm-max-part-size', 'nlm-max-file-size', 'nlm-extensions'].forEach(id => {
+            const el = $(id);
+            if (el) el.addEventListener('change', saveNLMConfig);
+        });
+
         // Filter
         let debounce;
         $('filter-input').addEventListener('input', e => {
@@ -200,6 +225,12 @@
             if (State.appSettings.viewMode !== 'list') { Status.error('CSV download is only available in List View'); return; }
             try { Render.downloadCsv(); Status.show('CSV downloaded successfully'); }
             catch (e) { console.error(e); Status.error('CSV creation failed'); }
+        });
+
+        // NotebookLM Export
+        $('export-notebooklm-btn').addEventListener('click', async () => {
+            try { await FileFlow.notebookLM.exportForNotebookLM(); }
+            catch (e) { console.error(e); Status.error('NotebookLM export failed: ' + e.message); }
         });
 
         // Stats
