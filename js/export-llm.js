@@ -14,6 +14,7 @@
         maxPartSizeBytes: 4 * 1024 * 1024,       // 4MB per output file
         maxFilesPerPart: 1000,                   // max files per output part (0 = unlimited)
         maxSingleFileSizeBytes: 1 * 1024 * 1024,  // Skip files > 1MB by default
+        excludePatterns: '**/node_modules/** **/dist/** **/build/** **/out/** **/target/** **/__pycache__/** **/.venv/** **/*.min.js **/*.min.css **/*.bundle.js',
         sourceExtensions: new Set([
             '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.hxx', '.inl',
             '.cs', '.rc', '.idl', '.def', '.asm', '.s',
@@ -35,6 +36,62 @@
     const SUBTREE_MAX_LINES = 300;
     // パートヘッダーに全パートマップを載せる上限パート数
     const PARTS_MAP_MAX = 32;
+    // チャンク分割時に確保するヘッダー予備バイト数
+    const CHUNK_RESERVED_BYTES = 8192;
+
+    /**
+     * 本文を行単位でチャンク分割する（巨大単一ファイル対策）。
+     * 各チャンクは指定バイト予算に収まる。予算内に収まらない1行は文字単位で切断する。
+     * @returns {Array<string>}
+     */
+    function _splitContent(content, budgetBytes, encoder) {
+        const enc = encoder || new TextEncoder();
+        if (!Number.isFinite(budgetBytes)) return [content];
+        const budget = Math.max(budgetBytes, 1024);
+        if (enc.encode(content).length <= budget) return [content];
+        // 改行込みセグメントで分割し、結合で完全復元できるようにする
+        const segs = content.match(/[^\n]*\n|[^\n]+$/g) || [content];
+        const chunks = [];
+        let cur = '';
+        let curBytes = 0;
+        const flush = () => { if (cur) { chunks.push(cur); cur = ''; curBytes = 0; } };
+        for (const seg of segs) {
+            const sb = enc.encode(seg).length;
+            if (sb > budget) {
+                flush();
+                // 長大1行は文字単位で切断（サロゲートペアを壊さないよう Array.from）
+                let piece = '';
+                let pieceBytes = 0;
+                for (const ch of Array.from(seg)) {
+                    const cb = enc.encode(ch).length;
+                    if (pieceBytes + cb > budget && piece) {
+                        chunks.push(piece);
+                        piece = '';
+                        pieceBytes = 0;
+                    }
+                    piece += ch;
+                    pieceBytes += cb;
+                }
+                if (piece) chunks.push(piece);
+                continue;
+            }
+            if (curBytes + sb > budget) flush();
+            cur += seg;
+            curBytes += sb;
+        }
+        flush();
+        return chunks.length ? chunks : [content];
+    }
+
+    /**
+     * 除外パターン（生成物ノイズ除去用）のマッチャーを生成する。空なら null。
+     * 既存のパス対応Globを再利用する。
+     */
+    function createExcludeMatcher(patterns) {
+        const { Glob } = FileFlow.utils;
+        if (!patterns || !patterns.trim()) return null;
+        return Glob.createMatcher(patterns);
+    }
 
     /**
      * 事前割付（I/Oなし）: バイト数と件数の二重制限でファイル群をパートに振り分ける。
@@ -258,6 +315,9 @@
             let done = 0;
 
             // Phase 2: パート単位ストリーミング
+            const chunkBudget = effectivePartSize === Infinity
+                ? Infinity
+                : effectivePartSize - CHUNK_RESERVED_BYTES;
             for (let p = 0; p < groups.length; p++) {
                 const partNum = p + 1;
                 const lines = [];
@@ -281,14 +341,20 @@
                         continue;
                     }
 
-                    const fileBlock = this._buildOKFFileBlock(item, content);
-                    lines.push(fileBlock);
-                    partFiles.push({
-                        path: item.relativePath,
-                        project: item.projectName || '',
-                        filter: item.filter || '',
-                        size: content.length,
-                        globalIndex: idx + 1
+                    // RAG対策: パート上限を超える単一ファイルはチャンク分割し、
+                    // 各断片にパス付き見出しを付けて帰属を保持する
+                    const pieces = _splitContent(content, chunkBudget, encoder);
+                    pieces.forEach((piece, k) => {
+                        const chunkLabel = pieces.length > 1 ? `split ${k + 1}/${pieces.length}` : null;
+                        lines.push(this._buildOKFFileBlock(item, piece, { chunkLabel }));
+                        partFiles.push({
+                            path: item.relativePath,
+                            project: item.projectName || '',
+                            filter: item.filter || '',
+                            size: content.length,
+                            globalIndex: idx + 1,
+                            chunk: chunkLabel
+                        });
                     });
                 }
 
@@ -359,7 +425,7 @@
             lines.push(`# Project Overview & Structure`);
             lines.push(`- **Root Workspace**: \`${rootName}\``);
             lines.push(`- **Export Mode**: \`${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'}\``);
-            lines.push(`- **Total Project Files**: ${totalFiles} | **Files in Part ${partNum}/${totalParts}**: ${currentPartFiles.length}`);
+            lines.push(`- **Total Project Files**: ${totalFiles} | **Files in Part ${partNum}/${totalParts}**: ${new Set(currentPartFiles.map(f => f.path)).size}`);
             lines.push(`- **Note**: See \`index.md\` (or \`index_001_of_N.md\`) for complete directory structure, all files index, and part mapping.\n`);
 
             if (mode === 'vcxproj' && projects && projects.length > 0) {
@@ -382,7 +448,8 @@
             lines.push('|---|---|---|');
             for (const f of currentPartFiles) {
                 const projTag = f.project ? ` [${f.project}]` : '';
-                lines.push(`| ${f.globalIndex} | \`${f.path}\`${projTag} | ${formatBytes(f.size)} |`);
+                const chunkTag = f.chunk ? ` (${f.chunk})` : '';
+                lines.push(`| ${f.globalIndex} | \`${f.path}\`${chunkTag}${projTag} | ${formatBytes(f.size)} |`);
             }
             lines.push('');
 
@@ -418,7 +485,8 @@
             return lines.join('\n');
         },
 
-        _buildOKFFileBlock(item, content) {
+        _buildOKFFileBlock(item, content, opts) {
+            const chunkLabel = (opts && opts.chunkLabel) || '';
             const lang = _detectLanguage(item.relativePath);
             const folderPath = dirnameOf(item.relativePath);
             const metaLines = [
@@ -429,17 +497,27 @@
             if (item.filter) metaLines.push(`filter: "${item.filter}"`);
             metaLines.push(`extension: "${_getExtension(item.relativePath)}"`);
             metaLines.push(`size_bytes: ${item.size}`);
+            if (chunkLabel) metaLines.push(`chunk: "${chunkLabel}"`);
+
+            // RAG対策: 本文がフェンス記号を含む場合は長いフェンスに自動切替し、
+            // ブロック構造の破損を防ぐ。末尾にパス付きフッターを付け、
+            // チャンク切断面のどちら側でも帰属が復元できるようにする。
+            const probe = metaLines.join('\n') + '\n' + content;
+            let fence = '```';
+            while (probe.includes(fence)) fence += '`';
 
             return [
-                `## File: \`${item.relativePath}\``,
+                `## File: \`${item.relativePath}\`${chunkLabel ? ` (${chunkLabel})` : ''}`,
                 '',
-                '```yaml',
+                `${fence}yaml`,
                 metaLines.join('\n'),
-                '```',
+                fence,
                 '',
-                `\`\`\`${lang}`,
+                `${fence}${lang}`,
                 content,
-                '```',
+                fence,
+                '',
+                `*End of file \`${item.relativePath}\`${chunkLabel ? ` (${chunkLabel})` : ''}*`,
                 '',
                 ''
             ].join('\n');
@@ -552,6 +630,8 @@
         const activeFilterLabel = State.searchQuery && State.searchQuery.trim()
             ? `Glob: ${State.searchQuery.trim()}`
             : null;
+        // 生成物ノイズ（node_modules等）は本文から除外し、indexには excluded として記録する
+        const excludeMatcher = createExcludeMatcher(config.excludePatterns);
 
         for (const entry of allFileEntries) {
             const ext = _getExtension(entry.name);
@@ -563,6 +643,7 @@
             if (globMatcher && !globMatcher(entry.name, relativePath)) continue;
 
             const isSourceTarget = config.sourceExtensions.has(ext);
+            const isExcluded = !!(excludeMatcher && excludeMatcher(entry.name, relativePath));
 
             let fileSize = 0;
             const meta = State.entryMetadata[entry.fullPath];
@@ -580,10 +661,11 @@
                 relativePath,
                 size: fileSize,
                 extension: ext,
-                isExportTarget: isSourceTarget
+                isExportTarget: isSourceTarget && !isExcluded,
+                excluded: isExcluded
             });
 
-            if (!isSourceTarget) continue;
+            if (!isSourceTarget || isExcluded) continue;
 
             const normalizedPath = normalizeLookupPath(entry.fullPath);
             const projRef = projectFileMap.get(normalizedPath) || _fuzzyMatchProject(entry, projectFileMap);
@@ -635,6 +717,35 @@
      * @param {number} options.maxPartSizeBytes - bytes (0 or Infinity for unsplit)
      * @param {number} options.maxFilesPerPart - files (0 or Infinity for unlimited)
      */
+    /**
+     * RAG対策: README系ドキュメントを先頭に固定したうえでモード別に整列する。
+     * エントリーポイント候補がパート1の先頭に来ることで、LLMが概要から読み進められる。
+     */
+    function sortFileItems(fileItems, mode) {
+        const isReadme = (item) => /^readme(\.|$)/i.test(item.relativePath.split('/').pop());
+        const byMode = (a, b) => {
+            if (mode === 'vcxproj') {
+                if (a.projectName !== b.projectName) return (a.projectName || 'Z').localeCompare(b.projectName || 'Z');
+            }
+            return a.relativePath.localeCompare(b.relativePath);
+        };
+        fileItems.sort((a, b) => {
+            const ra = isReadme(a) ? 0 : 1;
+            const rb = isReadme(b) ? 0 : 1;
+            return (ra - rb) || byMode(a, b);
+        });
+        return fileItems;
+    }
+
+    /**
+     * Main export function for LLM agents.
+     * @param {object} options
+     * @param {Array<string>|null} options.selectedProjectNames
+     * @param {string} options.mode - 'vcxproj' | 'folder_structure'
+     * @param {string} options.ext - '.md' | '.txt'
+     * @param {number} options.maxPartSizeBytes - bytes (0 or Infinity for unsplit)
+     * @param {number} options.maxFilesPerPart - files (0 or Infinity for unlimited)
+     */
     async function exportForLLM(options = {}) {
         const {
             selectedProjectNames = null,
@@ -672,15 +783,8 @@
             return;
         }
 
-        // Sort file items depending on mode
-        if (mode === 'vcxproj') {
-            fileItems.sort((a, b) => {
-                if (a.projectName !== b.projectName) return (a.projectName || 'Z').localeCompare(b.projectName || 'Z');
-                return a.relativePath.localeCompare(b.relativePath);
-            });
-        } else {
-            fileItems.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-        }
+        // Sort file items depending on mode (README first for RAG entry)
+        sortFileItems(fileItems, mode);
 
         Status.show(`Consolidating ${fileItems.length.toLocaleString()} files (OKF Markdown)...`, true);
 
@@ -865,12 +969,14 @@
             else s.binary++;
         }
 
-        // Build file-to-part mapping
+        // Build file-to-part mapping（分割ファイルは複数パートに属する）
         const filePartMap = new Map();
         if (partFileList) {
             for (let i = 0; i < partFileList.length; i++) {
                 for (const f of partFileList[i]) {
-                    filePartMap.set(f.path, i + 1);
+                    if (!filePartMap.has(f.path)) filePartMap.set(f.path, []);
+                    const arr = filePartMap.get(f.path);
+                    if (!arr.includes(i + 1)) arr.push(i + 1);
                 }
             }
         }
@@ -987,9 +1093,9 @@
         const allRows = [];
         for (let i = 0; i < allFilesInfo.length; i++) {
             const f = allFilesInfo[i];
-            const type = f.isExportTarget ? 'text' : 'binary';
-            const part = filePartMap.get(f.relativePath);
-            const partStr = part ? String(part) : '—';
+            const type = f.excluded ? 'excluded' : (f.isExportTarget ? 'text' : 'binary');
+            const partsHit = filePartMap.get(f.relativePath);
+            const partStr = partsHit ? partsHit.join(', ') : '—';
             allRows.push(`| ${i + 1} | \`${f.relativePath}\` | ${formatBytes(f.size)} | ${type} | ${partStr} |`);
         }
 
@@ -1107,8 +1213,15 @@
             sourceExtensions: saved.sourceExtensions
                 ? new Set(saved.sourceExtensions.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))
                 : DEFAULT_CONFIG.sourceExtensions,
+            excludePatterns: (typeof saved.excludePatterns === 'string')
+                ? saved.excludePatterns
+                : DEFAULT_CONFIG.excludePatterns,
             chunkSize: DEFAULT_CONFIG.chunkSize
         };
+    }
+
+    function getDefaultExcludesString() {
+        return DEFAULT_CONFIG.excludePatterns;
     }
 
     function getDefaultExtensionsString() {
@@ -1139,13 +1252,15 @@
         exportForLLM,
         getExportConfig,
         getDefaultExtensionsString,
+        getDefaultExcludesString,
         VcxprojParser,
         SourceConsolidator,
         DEFAULT_CONFIG,
         // テスト用の内部公開（仕様外）
         _internals: { getExtension: _getExtension, detectLanguage: _detectLanguage, fuzzyMatchProject: _fuzzyMatchProject, detectEntryPoints: _detectEntryPoints,
             generateTargetFilesCsv: _generateTargetFilesCsv, generateFolderStructureCsv: _generateFolderStructureCsv, generateVcxprojCsv: _generateVcxprojCsv,
-            generateIndexMd: _generateIndexMd, assignParts, buildSubtree: _buildSubtree }
+            generateIndexMd: _generateIndexMd, assignParts, buildSubtree: _buildSubtree,
+            splitContent: _splitContent, createExcludeMatcher, sortFileItems, getDefaultExcludesString }
     };
     // 旧名前空間の後方互換エイリアス（移行期間のみ）
     FileFlow.notebookLM = FileFlow.llmExport;

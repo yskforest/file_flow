@@ -15,6 +15,8 @@
 - **パート単体でも構造を保持**: 各パートのヘッダーに当パートのファイル目次＋ディレクトリサブツリー（ASCII図）を同梱。パート数が32以下の場合は全パートマップも付帯し、どのパート単体からでも全体像を復元可能。
 - **全パート共通グローバルインデックス**: `index.md`（All Files肥大時は `index.md` + `index_files_*` に自動分割）に完全なディレクトリ集計・パート対応・全ファイル一覧を掲載。
 - **メタデータ CSV 同梱**: モードに応じて `vcxproj_list.csv` または `folder_structure.csv` と、全対象明細 `target_files_list.csv` を同梱。
+- **RAGノイズ除去**: `node_modules`、`dist`、`build`、`__pycache__`、 minified/bundle 等の生成物は既定の除外パターンで本文から除外する（indexには `excluded` として記録）。パターンは設定で変更できる。
+- **README優先**: `README.*` を各モードの先頭に配置し、LLMが概要から読み進められるようにする。
 
 ---
 
@@ -89,6 +91,9 @@ entry_points:
 ### 3.3 ソースコードブロック (OKF File Block)
 
 各ソースファイルは、ファイル単位の H2 見出し、YAML メタデータ、およびコードフェンスで囲まれて出力されます。
+末尾にはパス付きフッター（`*End of file \`path\`*`）を付け、RAGのチャンク切断面のどちら側でも帰属が復元できるようにします。
+本文にフェンス記号（` ``` `）が含まれる場合は自動で長いフェンスに切り替え、ブロック構造の破損を防ぎます。
+パート上限を超える単一ファイルは行単位でチャンク分割し、`## File: \`path\` (split k/n)` の継続見出しで出力します（indexの Part 列には `2, 3` のように複数番号が入ります）。
 
 ```markdown
 ## File: `src/core/Engine.cpp`
@@ -109,6 +114,8 @@ namespace Core {
     Engine::Engine() {}
 }
 ```
+
+*End of file `src/core/Engine.cpp`*
 ```
 
 ---
@@ -178,7 +185,7 @@ generated_at: "2026-08-01T12:00:00Z"
 | **Build Units** | vcxprojモード時: プロジェクト別のファイル数・Defines・Include Dirs |
 | **Directory Structure** | 全ディレクトリの集約テーブル（ファイル数、エクスポート/非エクスポート、サイズ） |
 | **Export Parts Map** | 各パートファイル名、含まれるファイル数、主要ディレクトリの対応表 |
-| **All Files** | 全ファイル一覧テーブル（パス、サイズ、Type: text/binary、所属Part番号）。パートサイズ上限超過時は `index.md`（先頭）+ `index_files_002_of_N.md` … に自動分割（各シャードは `index.md` への参照付きで自己記述） |
+| **All Files** | 全ファイル一覧テーブル（パス、サイズ、Type: text/binary/excluded、所属Part番号。分割ファイルは `2, 3` のように複数番号）。パートサイズ上限超過時は `index.md`（先頭）+ `index_files_002_of_N.md` … に自動分割（各シャードは `index.md` への参照付きで自己記述） |
 
 ---
 
@@ -194,5 +201,5 @@ generated_at: "2026-08-01T12:00:00Z"
 
 ## 7. 分割設定と関連ドキュメント
 
-- 分割上限は設定モーダルまたはプレビューで変更できる（パート容量上限、パート件数上限、単一ファイル上限、対象拡張子）。分割アルゴリズムの詳細は [export-pipeline.md](export-pipeline.md) を参照。
+- 分割上限は設定モーダルまたはプレビューで変更できる（パート容量上限、パート件数上限、単一ファイル上限、対象拡張子、除外パターン）。分割アルゴリズムの詳細は [export-pipeline.md](export-pipeline.md) を参照。
 - 出力の解釈方法は [ai-format-guide.md](ai-format-guide.md)、全体の要求仕様は [../requirements.md](../requirements.md) を参照。

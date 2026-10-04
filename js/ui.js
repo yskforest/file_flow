@@ -101,6 +101,10 @@
                     <label class="setting-label">Target extensions (comma separated)</label>
                     <textarea id="llm-extensions" class="setting-textarea" rows="3"></textarea>
                 </div>
+                <div class="setting-item-block">
+                    <label class="setting-label">Exclude patterns (space separated, RAG noise reduction)</label>
+                    <textarea id="llm-excludes" class="setting-textarea" rows="2"></textarea>
+                </div>
             </div>`);
         createModal('stats-modal', 'Statistics', '<div id="stats-content"></div>');
         createModal('vcxproj-modal', 'Visual Studio Projects & LLM Export Preview', '<div id="vcxproj-preview-content"></div>');

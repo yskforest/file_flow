@@ -476,6 +476,96 @@
         assert.deepEqual(info.sourceFiles, ['src/a.cpp']);
     });
 
+    test("llmExport — fenced block survives backticks in content", () => {
+        const { SourceConsolidator } = FileFlow.llmExport;
+        const item = { relativePath: 'docs/a.md', projectName: '', filter: '', size: 10 };
+        const block = SourceConsolidator._buildOKFFileBlock(item, 'hello\n```js\ncode\n```\nbye\n');
+        // 長いフェンスに自動切替し、本文が壊れずに残ること
+        assert.ok(block.includes('````'));
+        assert.ok(block.includes('hello\n```js\ncode\n```\nbye'));
+        assert.ok(block.includes('*End of file `docs/a.md`*'));
+    });
+
+    test("llmExport — file block footer carries path", () => {
+        const { SourceConsolidator } = FileFlow.llmExport;
+        const item = { relativePath: 'src/a.cpp', projectName: '', filter: '', size: 1 };
+        const block = SourceConsolidator._buildOKFFileBlock(item, 'x');
+        assert.ok(block.includes('```cpp'));
+        assert.ok(block.includes('*End of file `src/a.cpp`*'));
+    });
+
+    test("llmExport — oversized single file is chunked with continuation", async () => {
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const big = Array.from({ length: 20 }, (_, i) => `line${i}`).join('\n') + '\n';
+        const items = [{
+            entry: { name: 'big.cpp', fullPath: '/root/big.cpp', file: (ok) => ok(new Blob([big])) },
+            relativePath: 'big.cpp', projectName: '', filter: '', size: big.length
+        }];
+        const { results, partFileList } = await SourceConsolidator.consolidate({
+            fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 9000, maxFilesPerPart: 0, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.ok(results.length >= 1);
+        const text = await results[0].blob.text();
+        // チャンク分割時は継続見出し、各断片にパスが付くこと
+        if (partFileList[0].length > 1) {
+            assert.ok(text.includes('(split 1/'));
+            assert.ok(text.includes('(split 2/'));
+        } else {
+            assert.ok(text.includes('## File: `big.cpp`'));
+        }
+        assert.ok(text.includes('*End of file `big.cpp`*'));
+    });
+
+    test("llmExport — splitContent chunks by budget", () => {
+        const t = FileFlow.llmExport._internals;
+        assert.deepEqual(t.splitContent('a\nb\n', Infinity), ['a\nb\n']);
+        const src = Array.from({ length: 200 }, () => '01234567').join('\n') + '\n';
+        const chunks = t.splitContent(src, 1024);
+        assert.ok(chunks.length >= 2);
+        assert.equal(chunks.join(''), src);
+        assert.ok(chunks.every(c => new TextEncoder().encode(c).length <= 1024));
+        // 長大1行は文字単位で切断される
+        const long = t.splitContent('x'.repeat(3000), 1024);
+        assert.ok(long.length > 1);
+        assert.equal(long.join(''), 'x'.repeat(3000));
+    });
+
+    test("llmExport — exclude matcher drops generated noise", () => {
+        const t = FileFlow.llmExport._internals;
+        const m = t.createExcludeMatcher(FileFlow.llmExport.DEFAULT_CONFIG.excludePatterns);
+        assert.ok(m);
+        assert.ok(!m('app.js', 'src/app.js'));
+        assert.ok(m('a.js', 'node_modules/pkg/a.js'));
+        assert.ok(m('b.js', 'proj/dist/b.js'));
+        assert.ok(m('c.min.js', 'src/c.min.js'));
+        assert.ok(m('d.js', 'build/d.js'));
+        assert.equal(t.createExcludeMatcher(''), null);
+        assert.equal(t.createExcludeMatcher('   '), null);
+    });
+
+    test("llmExport — sortFileItems pins README first", () => {
+        const t = FileFlow.llmExport._internals;
+        const mk = (rel, proj) => ({ relativePath: rel, projectName: proj || '' });
+        const items = [mk('src/z.cpp', 'B'), mk('README.md'), mk('src/a.cpp', 'A')];
+        t.sortFileItems(items, 'folder_structure');
+        assert.equal(items[0].relativePath, 'README.md');
+        const vcx = [mk('src/z.cpp', 'B'), mk('README.md'), mk('src/a.cpp', 'A')];
+        t.sortFileItems(vcx, 'vcxproj');
+        assert.equal(vcx[0].relativePath, 'README.md');
+        assert.equal(vcx[1].projectName, 'A');
+    });
+
+    test("llmExport — getExportConfig excludes default", () => {
+        FileFlow.state.appSettings = { llmExportConfig: {} };
+        const cfg = FileFlow.llmExport.getExportConfig();
+        assert.ok(cfg.excludePatterns.includes('node_modules'));
+        FileFlow.state.appSettings = { llmExportConfig: { excludePatterns: '' } };
+        assert.equal(FileFlow.llmExport.getExportConfig().excludePatterns, '');
+        FileFlow.state.appSettings = {};
+    });
+
     test("llmExport — assignParts honors size and count limits", () => {
         const t = FileFlow.llmExport._internals;
         const items = [

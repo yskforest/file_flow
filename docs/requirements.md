@@ -73,6 +73,7 @@ Include（`!` なし）と Exclude（`!` 付き）を組み合わせ可能で、
 | Max files per part | 1000 | LLMエクスポートのパート件数上限（0=無制限） |
 | Max single file size (MB) | 1 | LLMエクスポートの単一ファイル上限 |
 | Target extensions | 既定セット | LLMエクスポートの対象拡張子 |
+| Exclude patterns | 既定セット | LLMエクスポートの除外Glob（生成物ノイズ除去、空＝無効） |
 
 設定は `localStorage` に自動永続化される。
 
@@ -82,9 +83,9 @@ Include（`!` なし）と Exclude（`!` 付き）を組み合わせ可能で、
 
 - **vcxproj/vcxproj.filters 自動検出・解析**: Configuration、Platform、PreprocessorDefinitions、AdditionalIncludeDirectories、ClCompile / ClInclude / ResourceCompile の分類、フィルタ（仮想フォルダ）パスを抽出する。
 - **プレビュー**: 検出プロジェクトの一覧・ビルド定義・件数・概算容量・推定パート数（律速要因付き）を事前確認し、対象プロジェクトを選択できる。
-- **範囲**: ツールバーのGlobフィルタと対象拡張子設定が反映される。
-- **分割**: パート容量上限とパート件数上限の厳しい方で、ファイル境界で分割する。
-- **構造保持**: 各パートにファイル目次＋ディレクトリサブツリーを同梱し、全体索引は `index.md`（肥大時は `index_files_*` に自動分割）に集約する。
+- **範囲**: ツールバーのGlobフィルタ・対象拡張子・除外パターン（生成物ノイズ除去）が反映される。`README.*` は先頭に配置される。
+- **分割**: パート容量上限とパート件数上限の厳しい方で分割する。パート上限超の単一ファイルは行単位チャンクに分割し、継続見出し（`(split k/n)`）付きで出力する。
+- **構造保持**: 各パートにファイル目次＋ディレクトリサブツリーを同梱する。各ブロックはパス付き見出し・末尾フッターを持ち、本文内のフェンス記号では構造が壊れない。全体索引は `index.md`（肥大時は `index_files_*` に自動分割）に集約する。
 - **メタデータCSV**: `vcxproj_list.csv`（または `folder_structure.csv`）と `target_files_list.csv` を同梱する。
 - **文字コード変換**: Shift_JIS、EUC-JP等の非UTF-8ファイルを可能な限りUTF-8に変換する。
 
@@ -95,7 +96,7 @@ Include（`!` なし）と Exclude（`!` 付き）を組み合わせ可能で、
 `window.FileFlow.state` が保持する主な状態：
 
 - `currentRootEntries`: ドロップされたルート要素（`FileSystemEntry`）の配列
-- `appSettings`: `viewMode` / `actionMode` / `excludeDots` / `showFullPath` / `llmExportConfig`（`maxPartSizeMB` 既定4、`maxFilesPerPart` 既定1000（0=無制限）、`maxSingleFileSizeMB` 既定1、`sourceExtensions`）
+- `appSettings`: `viewMode` / `actionMode` / `excludeDots` / `showFullPath` / `llmExportConfig`（`maxPartSizeMB` 既定4、`maxFilesPerPart` 既定1000（0=無制限）、`maxSingleFileSizeMB` 既定1、`sourceExtensions`、`excludePatterns`）
 - `entryMetadata`: `fullPath` をキーとするメタデータキャッシュ（サイズ・日時・文字コード・改行コード・リネーム後名など。更新は `updateMeta` 経由）
 - `searchQuery`: 現在のフィルタクエリ
 
@@ -110,6 +111,7 @@ appSettings:
     maxFilesPerPart: 1000
     maxSingleFileSizeMB: 1
     sourceExtensions: ".cpp, .h, .c, .hpp, .cs, ..."
+    excludePatterns: "**/node_modules/** ..."
 ```
 
 ## 4. 受け入れ条件
@@ -119,5 +121,5 @@ appSettings:
 - **Globフィルタリング**: 複数パターンがデバウンス経由でリアルタイム評価され表示が絞り込まれること。
 - **アクション**: `.md`/`.txt` 適用で表示名とZIP内ファイル名が変わること（実ファイル不変）。Detect Infoで文字コード・改行コードが推定表示されること。
 - **エクスポート**: フィルタ後の構造・適用後ファイル名を維持したZIP、フィルタ・ソート反映のBOM付きUTF-8 CSVが出力されること。
-- **LLMエクスポート**: 対象ソースが統合テキストとして出力され、vcxproj検出時はビルド単位情報を含むこと。各出力が上限（容量・件数）内に収まり、ファイル境界で分割されること。複数パートはZIP化され、各パートに目次が含まれること。非UTF-8はUTF-8に変換されること。
+- **LLMエクスポート**: 対象ソースが統合テキストとして出力され、vcxproj検出時はビルド単位情報を含むこと。各出力が上限（容量・件数）内に収まり、ファイル境界で分割されること（上限超の単一ファイルは継続見出し付きチャンク分割）。複数パートはZIP化され、各パートに目次が含まれること。非UTF-8はUTF-8に変換されること。
 - **永続化と統計**: 設定が再読み込み後も復元されること。統計モーダルの集計が正確であること。
