@@ -52,9 +52,14 @@ function loadScript(relativeScriptPath) {
     vm.runInThisContext(code, { filename: absolutePath });
 }
 
-// Load core FileFlow scripts
+// Load core FileFlow scripts (dependency order)
+loadScript('../js/state.js');
 loadScript('../js/utils.js');
+loadScript('../js/core.js');
 loadScript('../js/actions.js');
+loadScript('../js/views.js');
+loadScript('../js/ui.js');
+loadScript('../js/export-llm.js');
 
 // Load Test Cases and runner
 const TestRunner = require('./test_runner.js');

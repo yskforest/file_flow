@@ -168,9 +168,9 @@ python -m http.server 8080
 - **メタデータキャッシュ** — `entryMetadata` にファイルサイズ・日時・エンコーディング情報をキャッシュし、再描画時のファイル再読み込みを回避。
 - **デバウンス** — フィルタ入力は 300ms のデバウンスでリアルタイム反映。
 
-### LLM エクスポート (NotebookLM Export)
+### LLM エクスポート (LLM Export)
 
-ツールバーの `Export for LLM` ボタンから起動します。1,000万行規模の Visual Studio プロジェクトのソースコードを LLM（NotebookLM等）へ投入可能な統合テキストに変換・分割エクスポートします。
+ツールバーの `Export for LLM` ボタンから起動します。1,000万行規模の Visual Studio プロジェクトのソースコードを LLMへ投入可能な統合テキストに変換・分割エクスポートします。ツールバーのGlobフィルタと対象拡張子設定がエクスポート範囲に反映されます。
 
 - **vcxproj 自動解析**: `vcxproj` や `vcxproj.filters` からプロジェクト名、ビルド構成、プリプロセッサ定義、インクルードパス、フィルタ（仮想フォルダ）情報を自動抽出。
 - **事前一覧確認モーダル**: エクスポート前に検出された `vcxproj` のビルド定義一覧・ファイル件数をカード形式で事前プレビュー確認し、対象プロジェクトを個別に選択可能。
@@ -196,13 +196,16 @@ index.html              … スケルトン HTML
 style.css               … 全スタイル定義 (CSS Variables ダークテーマ)
 docs/
 ├── requirements.md     … プロジェクト要件定義書
-├── export_format.md    … NotebookLM統合テキスト & CSV 出力仕様書
+├── export_format.md    … LLM統合テキスト & CSV 出力仕様書
 └── ai_format_guide.md  … 統合テキスト & CSV フォーマット解釈リファレンス書
 js/
-├── utils.js            … 名前空間定義 + ユーティリティ群 + アイコンヘルパー
-├── actions.js          … アクション基底クラス + レジストリ + 全アクション
-├── ui.js               … UI 描画 / モーダル生成 / フィルタ / ステータス / 統計
-├── export-notebooklm.js … vcxproj解析 / 統合テキスト & CSVエクスポート / プレビュー
+├── state.js            … 定数 + ストア (Proxy/PubSub, updateMeta/getMeta)
+├── utils.js            … 汎用 ($, format, escape, Icons, downloadBlob)
+├── core.js             … ドメイン (Globパス対応, FS, Detect, Entries, Zipモデル駆動)
+├── actions.js          … アクション基底クラス + レジストリ (DOM非依存・純粋)
+├── views.js            … TreeView / ListView 描画 (escape徹底)
+├── ui.js               … Status/Modal/Stats/Renderコーディネータ + LLMプレビュー
+├── export-llm.js       … vcxproj解析 / OKF統合テキスト & CSVエクスポート
 └── app.js              … エントリーポイント (イベントバインド + オーケストレーション)
 lib/
 └── jszip.min.js        … JSZip ライブラリ (setup.sh でダウンロード)
@@ -224,9 +227,10 @@ window.FileFlow = {
         entryMetadata: {},        // fullPath → { size, date, encoding, eol, newFilename, ... }
         searchQuery: ''           // 現在のフィルタクエリ
     },
-    actions: {},   // ActionManager + 各 Action クラス
-    ui: {},        // Render, Status, Stats, initModals
-    utils: {}      // $, formatBytes, Icons, Glob, FS, Detect, Zip
+    actions: {},   // ActionManager + 各 Action クラス (DOM非依存)
+    ui: {},        // Render, Status, Stats, initModals, applyActionResult, TreeHooks
+    views: {},     // Tree, List (描画専念)
+    utils: {}      // $, format, escape, Icons, Glob, FS, Entries, Detect, Zip, csv/blob/path共有
 };
 ```
 
@@ -234,21 +238,22 @@ window.FileFlow = {
 
 | モジュール | 名前空間 | 責務 |
 |---|---|---|
-| **utils.js** | `FileFlow.utils.$` | `getElementById` ショートカット |
-| | `FileFlow.utils.formatBytes` | バイト数フォーマット |
-| | `FileFlow.utils.Icons` | SVG アイコンテンプレートマップ |
-| | `FileFlow.utils.Glob` | Glob パターンマッチャー生成 |
-| | `FileFlow.utils.FS` | ディレクトリ読み込み (`readDir`)、再帰走査 (`traverse`) |
-| | `FileFlow.utils.Detect` | 文字コード・改行コード検出 (`detectFileInfo`) |
-| | `FileFlow.utils.Zip` | ZIP 生成 + ダウンロード (`downloadZip`) |
-| **actions.js** | `FileFlow.actions.BaseAction` | アクション基底クラス (`shouldApply`, `execute`) |
-| | `FileFlow.actions.ActionManager` | アクションレジストリ (`register`, `getAction`) |
-| | `FileFlow.actions.RenameAction` | `.md` / `.txt` 拡張子付与アクション |
-| | `FileFlow.actions.DetectAction` | 文字コード・改行コード検出アクション |
-| **ui.js** | `FileFlow.ui.Status` | トースト通知 (`show`, `hide`, `error`) |
-| | `FileFlow.ui.initModals` | Settings / Stats モーダルの動的生成 |
-| | `FileFlow.ui.Render` | ツリー/リスト描画、Grid.js 管理、カラムフィルタ/ソート、CSV エクスポート |
-| | `FileFlow.ui.Stats` | 統計計算 + レンダリング (`show`) |
+| **state.js** | `FileFlow.state` / `FileFlow.constants` | 定数集約、Proxyストア、PubSub、`updateMeta/getMeta` による通知保証 |
+| **utils.js** | `FileFlow.utils.$` ほか | `getElementById`、表示フォーマット、XSS対策 (`escapeHtml/escapeAttr`)、Icons、Blobダウンロード |
+| **core.js** | `FileFlow.utils.Glob` | パス対応マッチャー (`**`/`*`/`?`、basename+relPath判定) |
+| | `FileFlow.utils.FS` | 反復スタック走査 (`traverse`、中断可)、`readDir` 部分結果返却 |
+| | `FileFlow.utils.Entries` | `collectFiles/buildRelPath` (ZIP/一覧/統計のSingle Source) |
+| | `FileFlow.utils.Detect` | 文字コード・改行コード検出 |
+| | `FileFlow.utils.Zip` | モデル駆動ZIP (DOM非依存・未展開ノードも対象) |
+| | 共有 | `csvEscape/bomTextBlob/dirnameOf/normalizeLookupPath/readEntryFile` |
+| **actions.js** | `FileFlow.actions.BaseAction` | 基底クラス (`shouldApply`, `execute(entry)` 純粋・DOM非依存) |
+| | `FileFlow.actions.ActionManager` | レジストリ (`register`, `resolve`)。`md/txt/detect` 変換を一元化 |
+| **views.js** | `FileFlow.views.Tree/List` | 描画専念。Grid.js管理、CSV生成、表示escape徹底 |
+| **ui.js** | `FileFlow.ui.Status` | トースト通知 (トークン制でレース解消、ESCでモーダルを閉じる) |
+| | `FileFlow.ui.Render` | 描画統括 + `applyActionResult` でDOM反映 |
+| | `FileFlow.ui.Stats` | 単一走査の統計計算 + レンダリング |
+| | `FileFlow.ui.VcxprojPreview` | LLMエクスポートのプレビュー (escape済み) |
+| **export-llm.js** | `FileFlow.llmExport` | vcxproj解析/OKF統合/CSV/index.md生成。Globフィルタ尊重 (旧 `notebookLM` は互換エイリアス) |
 | **app.js** | *(IIFE)* | アイコン注入、設定読み書き、全 DOM イベントバインド |
 
 ### アクションシステム
@@ -258,7 +263,7 @@ Strategy パターンに基づく拡張可能なアクションアーキテク�
 ```
 BaseAction (抽象)
 ├── shouldApply(entry) → boolean   … 適用条件判定
-└── execute(itemDiv, entry) → Promise   … 実行ロジック
+└── execute(entry) → Promise<{applied, ...}>   … 純粋な実行・State更新のみ（描画反映は ui.applyActionResult）
     │
     ├── RenameAction('.md')   ← ActionManager.register() で登録
     ├── RenameAction('.txt')  ← 同上
@@ -274,10 +279,14 @@ ES Modules を使用しないため、`index.html` でのスクリプト読み�
 ```
 1. gridjs.umd.js           … Grid.js (CDN)
 2. lib/jszip.min.js        … JSZip (ローカル)
-3. js/utils.js             … 名前空間 + ユーティリティ (FileFlow.utils.*)
-4. js/actions.js           … アクションシステム (FileFlow.actions.*)
-5. js/ui.js                … UI層 (FileFlow.ui.*)
-6. js/app.js               … エントリーポイント (全モジュールに依存)
+3. js/state.js              … 定数 + ストア
+4. js/utils.js              … 汎用ユーティリティ
+5. js/core.js               … ドメイン (Glob/FS/Detect/Entries/Zip)
+6. js/actions.js            … アクションシステム (state/coreに依存)
+7. js/views.js              … ビュー層
+8. js/ui.js                 … UIコーディネータ (+ Preview)
+9. js/export-llm.js         … LLMエクスポート (core/uiに依存)
+10. js/app.js               … エントリーポイント (全モジュールに依存)
 ```
 
 ### 外部ライブラリ
@@ -301,10 +310,14 @@ file_flow/
 ├── docs/
 │   └── requirements.md    # プロジェクト要件定義書 (受入条件等を含む)
 ├── js/
-│   ├── utils.js           # 名前空間 + ユーティリティ + アイコン (178行)
-│   ├── actions.js         # アクションシステム (89行)
-│   ├── ui.js              # UI描画 + モーダル + 統計 (549行)
-│   └── app.js             # エントリーポイント (179行)
+│   ├── state.js           # 定数 + ストア
+│   ├── utils.js           # 汎用ユーティリティ + アイコン
+│   ├── core.js            # Glob/FS/Detect/Entries/Zip
+│   ├── actions.js         # アクションシステム (DOM非依存)
+│   ├── views.js           # Tree/List描画
+│   ├── ui.js              # UIコーディネータ + LLMプレビュー
+│   ├── export-llm.js      # vcxproj解析 / OKF統合 / CSVエクスポート
+│   └── app.js             # エントリーポイント
 ├── lib/
 │   └── jszip.min.js       # JSZip (setup.sh で生成, .gitignore)
 ├── test/

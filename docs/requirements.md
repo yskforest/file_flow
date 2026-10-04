@@ -13,9 +13,13 @@
 - **ファイル構成**:
   - `index.html` (エントリーポイント)
   - `style.css` (UIフレームワークは不使用、生のCSS Variablesで記述)
-  - `js/utils.js` (グローバル名前空間 `window.FileFlow.utils` のユーティリティ・検出ロジック・ZIP生成など)
+  - `js/state.js` (定数・ストア・PubSub・`updateMeta/getMeta`)
+  - `js/utils.js` (汎用ユーティリティ・XSS対策・アイコン)
+  - `js/core.js` (パス対応Glob・FS走査・検出ロジック・Entries・モデル駆動ZIP・CSV/Blob/パス共有ヘルパー)
   - `js/actions.js` (グローバル名前空間 `window.FileFlow.actions` のアクションクラス群・ActionManager)
-  - `js/ui.js` (グローバル名前空間 `window.FileFlow.ui` のUI描画・モーダル生成・統計描画など)
+  - `js/views.js` (TreeView/ListView描画)
+  - `js/ui.js` (UIコーディネータ・統計・LLMエクスポートプレビュー)
+  - `js/export-llm.js` (vcxproj解析・OKF統合テキスト・CSV/index.md生成。旧 `notebookLM` 名前空間は互換エイリアス)
   - `js/app.js` (エントリーポイント、イベントリスナーの登録とオーケストレーション)
   - `lib/jszip.min.js` (ZIP圧縮ライブラリ)
 - **フォーマット規約**: 
@@ -42,8 +46,8 @@
    - スキャンした全ファイルの合計サイズ、ファイル/フォルダ数、無視されたドットファイル数、拡張子ごとの件数統計テーブルをモーダルで表示する。
 7. **設定管理 (Settings Modal)**
    - 「ドットファイル/フォルダの除外 (excludeDots)」「リストビューでのフルパス表示 (showFullPath)」などの設定情報を `localStorage` を介して自動永続化する。
-8. **NotebookLM向けソースコード統合エクスポート (LLM Export)**
-   - 大規模Visual Studioプロジェクト（1000万行規模）のソースコードを、LLM（NotebookLM等）が解析可能な統合テキストファイルとして出力する。
+8. **LLM向けソースコード統合エクスポート (LLM Export)**
+   - 大規模Visual Studioプロジェクト（1000万行規模）のソースコードを、LLMが解析可能な統合テキストファイルとして出力する。ツールバーのGlobフィルタと対象拡張子設定が範囲に反映される。
    - **vcxproj/vcxproj.filters 自動検出・解析**: フォルダドロップ時に `.vcxproj` および `.vcxproj.filters` を自動検出し、XML解析により以下のビルド単位情報を抽出する:
      - Configuration（Debug/Release等）、Platform
      - PreprocessorDefinitions（プリプロセッサ定義）
@@ -76,7 +80,7 @@
   - `actionMode` (string): `'md'` (Add .md) | `'txt'` (Add .txt) | `'detect'` (Detect Info)
   - `excludeDots` (boolean): ドットファイル/フォルダを除外するかどうかのフラグ
   - `showFullPath` (boolean): リストビューでファイルのフルパスを表示するかどうかのフラグ
-  - `notebookLMConfig` (object): LLMエクスポート設定
+  - `llmExportConfig` (object): LLMエクスポート設定（旧 `notebookLMConfig` から自動移行）
     - `maxPartSizeMB` (number): 出力ファイルの最大サイズ（MB、デフォルト: 4）
     - `maxSingleFileSizeMB` (number): 単一ファイルの最大サイズ（MB、デフォルト: 1）
     - `sourceExtensions` (string): 対象拡張子のカンマ区切り文字列
@@ -93,7 +97,7 @@ appSettings:
   actionMode: "md"       # アクション適用モード ('md' | 'txt' | 'detect')
   excludeDots: true      # ドットファイル/フォルダ除外フラグ (true/false)
   showFullPath: true     # リストビューでのフルパス表示フラグ (true/false)
-  notebookLMConfig:
+  llmExportConfig:
     maxPartSizeMB: 4           # 出力ファイルの最大サイズ（MB）
     maxSingleFileSizeMB: 1     # 単一ファイルの最大サイズ（MB）
     sourceExtensions: ".cpp, .h, .c, .hpp, .cs, ..."  # 対象拡張子
@@ -127,7 +131,7 @@ entryMetadata:
 - **エクスポート機能**:
   - **ZIPダウンロード**: フィルタにより表示中のファイル群が、アクション適用後のファイル名および元のフォルダ構造を維持した状態で正しくZIPファイルとして生成・ダウンロードされること。
   - **CSVダウンロード**: リストビュー選択時に、現在のフィルタおよびソート状態に合わせた表データが、BOM付き UTF-8 CSV として正しくエクスポートされること。
-- **NotebookLM エクスポート機能**:
+- **LLM エクスポート機能**:
   - 「Export for LLM」ボタン押下時に、対象拡張子のソースファイルが統合テキストファイルとして出力されること。
   - vcxproj ファイルが検出された場合、ビルド単位情報（Configuration、Defines、IncludeDirs、ソース/ヘッダ分類、フィルタパス）が出力に含まれること。
   - 各出力ファイルが設定された最大サイズ（デフォルト4MB）以下であること。

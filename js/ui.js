@@ -1,6 +1,7 @@
 // FileFlow — UI Layer
 (function () {
     const { $, formatBytes, formatDate, Icons, Glob, FS, Detect, downloadBlob } = FileFlow.utils;
+    const { escapeHtml, escapeAttr } = FileFlow.utils;
     const State = FileFlow.state;
 
     // =====================
@@ -8,22 +9,25 @@
     // =====================
 
     let hideTimeout = null;
+    let showToken = 0;
     const Status = {
         show(msg, isLoading = false) {
             clearTimeout(hideTimeout);
+            const token = ++showToken;
             const toast = $('status-toast'), text = $('status-text');
             if (!toast || !text) return;
             text.textContent = msg;
             toast.classList.remove('hidden');
             const spinner = toast.querySelector('.spinner');
             if (spinner) spinner.style.display = isLoading ? 'block' : 'none';
-            if (!isLoading) hideTimeout = setTimeout(() => toast.classList.add('hidden'), 3000);
+            if (!isLoading) hideTimeout = setTimeout(() => { if (token === showToken) toast.classList.add('hidden'); }, 3000);
         },
         hide(delay = 0) {
             clearTimeout(hideTimeout);
+            const token = showToken;
             const toast = $('status-toast');
             if (!toast) return;
-            delay > 0 ? (hideTimeout = setTimeout(() => toast.classList.add('hidden'), delay)) : toast.classList.add('hidden');
+            delay > 0 ? (hideTimeout = setTimeout(() => { if (token === showToken) toast.classList.add('hidden'); }, delay)) : toast.classList.add('hidden');
         },
         error(msg) { Status.show(`Error: ${msg}`); }
     };
@@ -32,7 +36,9 @@
     //  Modal Factory
     // =====================
 
+    let escBound = false;
     function createModal(id, title, bodyHTML) {
+        const { escapeHtml } = FileFlow.utils;
         let modal = $(id);
         if (!modal) {
             modal = document.createElement('div');
@@ -43,7 +49,7 @@
         modal.innerHTML = `
             <div class="modal-content">
                 <div class="modal-header">
-                    <h3>${title}</h3>
+                    <h3>${escapeHtml(title)}</h3>
                     <button class="icon-btn close-modal-btn">${Icons.close}</button>
                 </div>
                 <div class="modal-body">${bodyHTML}</div>
@@ -51,6 +57,16 @@
         const close = () => modal.classList.add('hidden');
         modal.querySelector('.close-modal-btn').addEventListener('click', close);
         modal.addEventListener('click', e => { if (e.target === modal) close(); });
+        if (!escBound) {
+            escBound = true;
+            document.addEventListener('keydown', e => {
+                if (e.key === 'Escape') {
+                    document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden'));
+                    const gf = document.getElementById('grid-filter-menu');
+                    if (gf) gf.classList.add('hidden');
+                }
+            });
+        }
         return modal;
     }
 
@@ -71,15 +87,15 @@
                 <h4>LLM Export Settings</h4>
                 <div class="setting-item-block">
                     <label class="setting-label">Max part size (MB)</label>
-                    <input type="number" id="nlm-max-part-size" class="setting-input-sm" value="4" min="1" max="50" step="1">
+                    <input type="number" id="llm-max-part-size" class="setting-input-sm" value="4" min="1" max="50" step="1">
                 </div>
                 <div class="setting-item-block">
                     <label class="setting-label">Max single file size (MB)</label>
-                    <input type="number" id="nlm-max-file-size" class="setting-input-sm" value="1" min="0.1" max="10" step="0.1">
+                    <input type="number" id="llm-max-file-size" class="setting-input-sm" value="1" min="0.1" max="10" step="0.1">
                 </div>
                 <div class="setting-item-block">
                     <label class="setting-label">Target extensions (comma separated)</label>
-                    <textarea id="nlm-extensions" class="setting-textarea" rows="3"></textarea>
+                    <textarea id="llm-extensions" class="setting-textarea" rows="3"></textarea>
                 </div>
             </div>`);
         createModal('stats-modal', 'Statistics', '<div id="stats-content"></div>');
@@ -87,385 +103,72 @@
     }
 
     // =====================
-    //  Tree View
+    //  Action Result Rendering (DOM反映の一元化・XSS安全)
     // =====================
 
-    function shouldInclude(entry) {
-        return !(State.appSettings.excludeDots && entry.name.startsWith('.'));
+    function renderBadgesInto(itemDiv, info) {
+        itemDiv.querySelectorAll('.info-badge').forEach(b => b.remove());
+        const nameSpan = itemDiv.querySelector('.file-name');
+        if (!nameSpan || !info) return;
+        const badge = (text, bg, color, ml) => {
+            const s = document.createElement('span');
+            s.className = 'info-badge';
+            s.textContent = text;
+            s.style.cssText = `background:${bg};color:${color};padding:2px 6px;border-radius:4px;font-size:.75rem;margin-left:${ml}px;font-family:monospace`;
+            return s;
+        };
+        nameSpan.after(badge(info.eol, 'rgba(168,85,247,.2)', '#c084fc', 4));
+        nameSpan.after(badge(info.encoding, 'rgba(56,189,248,.2)', '#38bdf8', 8));
     }
 
-    function createTreeElement(entry) {
-        const li = document.createElement('li');
-        const div = document.createElement('div');
-        div.className = 'item';
-        div.entry = entry;
-
-        const icon = document.createElement('i');
-        icon.className = entry.isDirectory ? 'fas fa-folder folder-icon' : 'far fa-file file-icon';
-        div.appendChild(icon);
-
-        const name = document.createElement('span');
-        name.className = 'file-name';
-        name.textContent = entry.name;
-        div.appendChild(name);
-        li.appendChild(div);
-
-        if (entry.isDirectory) {
-            div.classList.add('folder-toggle');
-            const arrow = document.createElement('span');
-            arrow.className = 'arrow';
-            arrow.innerHTML = '&#9656;';
-            div.prepend(arrow);
-            const nested = document.createElement('ul');
-            nested.className = 'nested';
-            li.appendChild(nested);
-            li.dataset.loaded = 'false';
-            li.entry = entry;
-            div.addEventListener('click', e => { e.stopPropagation(); toggleFolder(div); });
-        } else {
-            div.classList.add('file-item');
-            div.addEventListener('click', async e => {
-                e.stopPropagation();
-                const mode = State.appSettings.actionMode;
-                const action = FileFlow.actions.ActionManager.getAction(mode === 'detect' ? 'detect' : '.' + mode);
-                if (action && action.shouldApply(entry)) await action.execute(div, entry);
-            });
-        }
-        return li;
-    }
-
-    async function toggleFolder(div) {
-        const li = div.parentElement, arrow = div.querySelector('.arrow'), nested = li.querySelector('.nested');
-        if (nested.classList.contains('expanded')) {
-            nested.classList.remove('expanded');
-            div.classList.remove('open');
-            arrow.style.transform = 'rotate(0deg)';
-        } else {
-            if (li.dataset.loaded === 'false') {
-                await loadChildren(li.entry, nested);
-                li.dataset.loaded = 'true';
-            }
-            nested.classList.add('expanded');
-            div.classList.add('open');
-            arrow.style.transform = 'rotate(90deg)';
-        }
-    }
-
-    async function loadChildren(dirEntry, container) {
-        container.innerHTML = '';
-        const entries = await FS.readDir(dirEntry);
-        entries.sort((a, b) => a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1);
-        for (const child of entries)
-            if (shouldInclude(child)) container.appendChild(createTreeElement(child));
-    }
-
-    // =====================
-    //  Grid.js List View
-    // =====================
-
-    let gridInstance = null, originalGridData = [], currentGridData = [];
-    let activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
-    let currentSort = { colIndex: null, direction: 'asc' };
-    let currentFilterColIndex = null;
-
-    function getColValue(row, col) {
-        if (col === 1) return formatBytes(row[col]);
-        if (col === 2) return formatDate(row[col]);
-        return String(row[col] || '(None)');
-    }
-
-    // --- Filter Popover ---
-
-    function toggleFilterMenu(btn, colIndex, colName) {
-        let menu = $('grid-filter-menu');
-        if (!menu) {
-            menu = document.createElement('div');
-            menu.id = 'grid-filter-menu';
-            menu.className = 'filter-popover hidden';
-            document.body.appendChild(menu);
-            document.addEventListener('click', e => {
-                if (!menu.contains(e.target) && !e.target.closest('.filter-icon-btn'))
-                    menu.classList.add('hidden');
-            });
-        }
-
-        if (!menu.classList.contains('hidden') && currentFilterColIndex === colIndex) {
-            menu.classList.add('hidden');
-            return;
-        }
-        currentFilterColIndex = colIndex;
-
-        // Build dataset filtered by OTHER columns
-        let base = [...originalGridData];
-        for (let c = 0; c < 6; c++) {
-            if (c !== colIndex && activeFilters[c]?.length)
-                base = base.filter(row => activeFilters[c].includes(getColValue(row, c)));
-        }
-
-        const unique = [...new Set(base.map(r => getColValue(r, colIndex)))].sort((a, b) =>
-            a === '(None)' ? 1 : b === '(None)' ? -1 : String(a).localeCompare(String(b)));
-
-        const active = activeFilters[colIndex];
-        const allSelected = !active.length || active.length === unique.length;
-
-        const checkboxes = unique.map(val =>
-            `<label class="filter-checkbox-item">
-                <input type="checkbox" value="${val}" ${allSelected || active.includes(val) ? 'checked' : ''}>
-                <span class="type-label" title="${val}">${val}</span>
-            </label>`).join('');
-
-        menu.innerHTML = `
-            <div class="filter-actions">
-                <button class="text-btn outline sort-asc-btn">Sort Ascending</button>
-                <button class="text-btn outline sort-desc-btn">Sort Descending</button>
-            </div>
-            <hr class="filter-divider">
-            <div class="filter-search-container">
-                <input type="text" id="grid-filter-search" class="search-input full-width search-input-field" placeholder="Search ${colName}...">
-            </div>
-            <div class="filter-bulk-actions">
-                <a href="#" class="select-all-btn">Select All</a> -
-                <a href="#" class="clear-all-btn">Clear</a>
-            </div>
-            <div class="filter-options-list" id="grid-checkbox-list">${checkboxes}</div>
-            <div class="filter-footer">
-                <button class="text-btn outline cancel-btn">Cancel</button>
-                <button class="text-btn apply-btn">Apply</button>
-            </div>`;
-
-        // Bind events programmatically
-        menu.querySelector('.sort-asc-btn').addEventListener('click', () => sortGridByColumn(colIndex, 'asc'));
-        menu.querySelector('.sort-desc-btn').addEventListener('click', () => sortGridByColumn(colIndex, 'desc'));
-        
-        const searchInput = menu.querySelector('.search-input-field');
-        searchInput.addEventListener('input', e => filterCheckboxes(e.target.value));
-
-        menu.querySelector('.select-all-btn').addEventListener('click', e => {
-            e.preventDefault();
-            toggleAllCheckboxes(true);
-        });
-        menu.querySelector('.clear-all-btn').addEventListener('click', e => {
-            e.preventDefault();
-            toggleAllCheckboxes(false);
-        });
-
-        menu.querySelector('.cancel-btn').addEventListener('click', () => menu.classList.add('hidden'));
-        menu.querySelector('.apply-btn').addEventListener('click', () => applyColumnFilter());
-
-        const rect = btn.getBoundingClientRect();
-        menu.style.top = (rect.bottom + window.scrollY + 8) + 'px';
-        menu.style.left = (rect.left + window.scrollX - 200 + rect.width) + 'px';
-        menu.classList.remove('hidden');
-
-        setTimeout(() => { const s = $('grid-filter-search'); if (s) s.focus(); }, 50);
-    }
-
-    function toggleAllCheckboxes(check) {
-        const list = $('grid-checkbox-list');
-        if (list) list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-            if (cb.parentElement.style.display !== 'none') cb.checked = check;
-        });
-    }
-
-    function filterCheckboxes(query) {
-        const list = $('grid-checkbox-list');
-        if (!list) return;
-        const q = query.toLowerCase();
-        list.querySelectorAll('.filter-checkbox-item').forEach(label => {
-            label.style.display = label.querySelector('.type-label').textContent.toLowerCase().includes(q) ? 'flex' : 'none';
-        });
-    }
-
-    function applyFiltersAndSort() {
-        if (!gridInstance) return;
-        let data = [...originalGridData];
-
-        // Filter
-        for (let c = 0; c < 6; c++) {
-            if (activeFilters[c]?.length)
-                data = data.filter(row => activeFilters[c].includes(getColValue(row, c)));
-        }
-
-        // Sort
-        if (currentSort.colIndex !== null) {
-            const col = currentSort.colIndex, dir = currentSort.direction;
-            data.sort((a, b) => {
-                let va = a[col], vb = b[col];
-                if (col === 1 || col === 2) { va = Number(va) || 0; vb = Number(vb) || 0; return dir === 'asc' ? va - vb : vb - va; }
-                va = String(va || ''); vb = String(vb || '');
-                return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
-            });
-        }
-
-        currentGridData = data;
-        gridInstance.updateConfig({ data }).forceRender();
-
-        // Update filter icon states
-        setTimeout(() => {
-            document.querySelectorAll('.filter-icon-btn').forEach((btn, c) => {
-                const isActive = activeFilters[c]?.length > 0;
-                btn.classList.toggle('active', isActive);
-                btn.style.color = isActive ? 'var(--accent-color)' : '';
-                btn.style.backgroundColor = isActive ? 'rgba(var(--accent-color-rgb), 0.1)' : '';
-            });
-        }, 50);
-    }
-
-    function applyColumnFilter() {
-        const menu = $('grid-filter-menu');
-        if (!menu || currentFilterColIndex === null) return;
-        const cbs = menu.querySelectorAll('input[type="checkbox"]');
-        const selected = [...cbs].filter(cb => cb.checked).map(cb => cb.value);
-        activeFilters[currentFilterColIndex] = selected.length === cbs.length || !selected.length ? [] : selected;
-        menu.classList.add('hidden');
-        applyFiltersAndSort();
-    }
-
-    function sortGridByColumn(colIndex, direction) {
-        const menu = $('grid-filter-menu');
-        if (menu) menu.classList.add('hidden');
-        currentSort = { colIndex, direction };
-        applyFiltersAndSort();
-    }
-
-    // --- CSV Export ---
-
-    function downloadCsv() {
-        if (!gridInstance || !currentGridData.length) { Status.error('No data to export'); return; }
-        const headers = ['Name', 'Size (Bytes)', 'Date (Timestamp)', 'Type', 'Encode', 'EOL'];
-        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-        const csv = [headers.join(','), ...currentGridData.map(row => row.map(escape).join(','))].join('\n') + '\n';
-        const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csv], { type: 'text/csv;charset=utf-8;' });
-        const name = State.currentRootEntries.length === 1 ? State.currentRootEntries[0].name + '_export.csv' : 'file_flow_export.csv';
-        downloadBlob(blob, name);
-    }
-
-    // --- Render Flat List (Grid.js) ---
-
-    async function renderFlatList(matcher) {
-        const list = $('file-list');
-        if (!list) return;
-        list.innerHTML = '';
-        list.classList.remove('file-tree');
-        list.classList.add('file-grid');
-
-        const roots = State.currentRootEntries;
-        const isSingleRoot = roots.length === 1 && roots[0].isDirectory;
-        const fileEntries = [];
-
-        // Collect all files with paths
-        async function collect(entries, path = '', depth = 0) {
-            for (const entry of entries) {
-                if (!shouldInclude(entry)) continue;
-                let p = path ? `${path}/${entry.name}` : entry.name;
-                if (isSingleRoot && depth === 0) p = '';
-                if (entry.isDirectory) {
-                    await collect(await FS.readDir(entry), p, depth + 1);
+    function applyActionResult(entry, itemDiv, result) {
+        if (!result || !result.applied || !itemDiv) return;
+        if (result.newName) {
+            const nameSpan = itemDiv.querySelector('.file-name');
+            if (nameSpan) {
+                if (State.appSettings.viewMode === 'list' && nameSpan.textContent.includes('/')) {
+                    const parts = nameSpan.textContent.split('/');
+                    parts[parts.length - 1] = result.newName;
+                    nameSpan.textContent = parts.join('/');
                 } else {
-                    if (!matcher || matcher(entry.name)) fileEntries.push({ handle: entry, path: p });
+                    nameSpan.textContent = result.newName;
                 }
             }
+            itemDiv.classList.add('renamed');
+            itemDiv.downloadName = result.newName;
         }
-        await collect(roots, '', 0);
-
-        // Build grid data in chunks
-        const gridData = [], CHUNK = 1000, showFull = State.appSettings.showFullPath;
-
-        for (let i = 0; i < fileEntries.length; i += CHUNK) {
-            const chunk = fileEntries.slice(i, i + CHUNK);
-            await Promise.all(chunk.map(async item => {
-                const pathKey = item.handle.fullPath || item.path;
-                let meta = State.entryMetadata[pathKey];
-                let size = 0, date = null, encoding = '-', eol = '-';
-                const type = item.handle.name.includes('.') ? item.handle.name.split('.').pop().toLowerCase() : '';
-
-                if (meta?.size !== undefined) {
-                    ({ size, date, encoding = '-', eol = '-' } = meta);
-                } else {
-                    try {
-                        const file = await new Promise((res, rej) => item.handle.file(res, rej));
-                        size = file.size; date = file.lastModified;
-                        const info = await Detect.detectFileInfo(file);
-                        encoding = info.encoding; eol = info.eol;
-                        State.entryMetadata[pathKey] = { ...State.entryMetadata[pathKey], size, date, encoding, eol };
-                    } catch { /* skip */ }
-                }
-
-                let displayName = item.handle.name;
-                meta = State.entryMetadata[pathKey];
-                if (meta?.newFilename) displayName = meta.newFilename;
-                gridData.push([showFull ? item.path : displayName, size, date, type, encoding, eol]);
-            }));
-
-            Status.show(`Processing files... (${Math.min(i + CHUNK, fileEntries.length)} / ${fileEntries.length})`, true);
-            await new Promise(r => setTimeout(r, 0));
-        }
-
-        // Reset grid state
-        originalGridData = gridData;
-        currentGridData = gridData;
-        activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
-        currentSort = { colIndex: null, direction: 'asc' };
-
-        Status.show('Finalizing UI...', true);
-        await new Promise(r => setTimeout(r, 0));
-
-        const wrapper = document.createElement('div');
-        wrapper.style.height = '100%';
-        list.appendChild(wrapper);
-
-        // Delegated event listener for filter icon button inside wrapper
-        wrapper.addEventListener('click', e => {
-            const filterBtn = e.target.closest('.filter-icon-btn');
-            if (filterBtn) {
-                e.stopPropagation();
-                const colIndex = parseInt(filterBtn.getAttribute('data-col-index'), 10);
-                const colName = filterBtn.getAttribute('data-col-name');
-                toggleFilterMenu(filterBtn, colIndex, colName);
-            }
-        });
-
-        const headerHTML = (name, idx) => `
-            <div style="display:flex;align-items:center;justify-content:space-between;position:relative">
-                ${name}
-                <button class="filter-icon-btn" title="Filter / Sort by ${name}" data-col-index="${idx}" data-col-name="${name}">
-                    ${Icons.filter}
-                </button>
-            </div>`;
-
-        const cols = [
-            { name: 'Name', id: 'Name', formatter: c => gridjs.html(`<span class="grid-filename" title="${c}">${c}</span>`) },
-            { name: 'Size', id: 'Size', width: '120px', formatter: c => formatBytes(c) },
-            { name: 'Date', id: 'Date', width: '180px', formatter: c => formatDate(c) },
-            { name: 'Type', id: 'Type', width: '90px' },
-            { name: 'Encode', id: 'Encode', width: '120px' },
-            { name: 'EOL', id: 'EOL', width: '90px' },
-        ].map((col, i) => ({ ...col, name: gridjs.html(headerHTML(col.name, i)), sort: false }));
-
-        gridInstance = new gridjs.Grid({
-            columns: cols,
-            data: gridData,
-            search: false, sort: false, resizable: true,
-            pagination: { limit: 500 },
-            fixedHeader: true, height: '100%',
-            style: {
-                th: { 'background-color': 'var(--bg-secondary)', 'color': 'var(--text-primary)', 'border': '1px solid var(--border-color)' },
-                td: { 'background-color': 'var(--bg-primary)', 'color': 'var(--text-secondary)', 'border': '1px solid var(--border-color)' }
-            },
-            className: { table: 'custom-grid-table', th: 'custom-grid-th', td: 'custom-grid-td' }
-        }).render(wrapper);
-
-        Status.hide(500);
+        if (result.encoding) renderBadgesInto(itemDiv, { encoding: result.encoding, eol: result.eol });
     }
+
+    // ツリー遅延読込時から参照できる公開フック（views.js が遅延解決する）
+    const TreeHooks = {
+        renderBadges: renderBadgesInto,
+        onFileClick: async (entry, div) => {
+            const action = FileFlow.actions.ActionManager.resolve(State.appSettings.actionMode);
+            if (action && action.shouldApply(entry)) {
+                applyActionResult(entry, div, await action.execute(entry));
+            }
+        }
+    };
 
     // =====================
     //  Main Render
     // =====================
 
+    function applyTreeFilter(listEl, matcher) {
+        const rootNames = State.currentRootEntries.map(r => r.name || '');
+        listEl.querySelectorAll('li').forEach(li => {
+            const item = li.querySelector('.item');
+            const entry = (item && item.entry) || li.entry;
+            if (!entry || entry.isDirectory) return;
+            const rel = FileFlow.utils.Entries.buildRelPath(entry, rootNames) || entry.name;
+            li.classList.toggle('filtered-out', !matcher(entry.name, rel));
+        });
+    }
+
     async function renderFileList() {
         const list = $('file-list');
         if (!list) return;
-        list.innerHTML = '';
         const matcher = Glob.createMatcher(State.searchQuery);
         const container = $('file-list-container'), dropZone = $('drop-zone');
 
@@ -474,20 +177,36 @@
             if (dropZone) dropZone.classList.add('hidden');
 
             if (State.appSettings.viewMode === 'tree') {
+                list.innerHTML = '';
                 list.classList.add('file-tree');
                 list.classList.remove('file-grid');
+                FileFlow.views.List.reset();
                 const autoExpand = State.currentRootEntries.length === 1 && State.currentRootEntries[0].isDirectory;
                 for (const entry of State.currentRootEntries) {
-                    if (!shouldInclude(entry)) continue;
-                    const el = createTreeElement(entry);
+                    if (!FileFlow.views.Tree.shouldInclude(entry)) continue;
+                    const el = FileFlow.views.Tree.createTreeElement(entry, TreeHooks);
                     list.appendChild(el);
                     if (!matcher && autoExpand) {
                         const toggle = el.querySelector('.item.folder-toggle');
-                        if (toggle) await toggleFolder(toggle);
+                        if (toggle) await FileFlow.views.Tree.toggleFolder(toggle);
                     }
                 }
+                if (matcher) applyTreeFilter(list, matcher);
             } else {
-                await renderFlatList(matcher);
+                Status.show('Processing files...', true);
+                try {
+                    const items = await FileFlow.utils.Entries.collectFiles(State.currentRootEntries, {
+                        matcher, excludeDots: State.appSettings.excludeDots
+                    });
+                    Status.show('Finalizing UI...', true);
+                    await FileFlow.views.List.renderFlatList(list, items, (done, total) => {
+                        Status.show(`Processing files... (${done} / ${total})`, true);
+                    });
+                    Status.hide(500);
+                } catch (e) {
+                    console.error(e);
+                    Status.error('List render failed');
+                }
             }
         } else {
             if (container) container.classList.add('hidden');
@@ -506,27 +225,33 @@
         let totalFiles = 0, totalFolders = 0, totalFileSize = 0;
         const extCounts = {}, ignoredFolders = {};
         const matcher = Glob.createMatcher(State.searchQuery);
+        const roots = State.currentRootEntries || [];
+        const rootNames = roots.map(r => r.name || '');
+        const relOf = (entry) => FileFlow.utils.Entries.buildRelPath(entry, rootNames) || entry.name;
 
-        await FS.traverse(State.currentRootEntries, async entry => {
-            const isMatch = !matcher || matcher(entry.name);
-
-            if (State.appSettings.excludeDots && entry.name.startsWith('.')) {
-                if (entry.isDirectory) ignoredFolders[entry.name] = (ignoredFolders[entry.name] || 0) + 1;
-                return false;
+        // 単一走査（relパス追跡でGlobのパス対応を統計にも適用）
+        async function walk(entries, prefix) {
+            for (const entry of entries) {
+                const rel = entry.fullPath ? relOf(entry) : (prefix ? `${prefix}/${entry.name}` : entry.name);
+                if (State.appSettings.excludeDots && entry.name && entry.name.startsWith('.')) {
+                    if (entry.isDirectory) ignoredFolders[entry.name] = (ignoredFolders[entry.name] || 0) + 1;
+                    continue;
+                }
+                const isMatch = !matcher || matcher(entry.name, rel);
+                if (entry.isDirectory) {
+                    if (isMatch) totalFolders++;
+                    await walk(await FS.readDir(entry), rel);
+                } else if (isMatch) {
+                    totalFiles++;
+                    const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop().toLowerCase() : 'no-ext';
+                    extCounts[ext] = (extCounts[ext] || 0) + 1;
+                    const meta = State.getMeta(entry.fullPath || entry.name);
+                    if (meta && meta.size !== undefined && meta.size !== '') { totalFileSize += Number(meta.size) || 0; }
+                    else { try { totalFileSize += (await FileFlow.utils.readEntryFile(entry)).size || 0; } catch { /* skip */ } }
+                }
             }
-
-            if (entry.isDirectory) {
-                if (isMatch) totalFolders++;
-            } else if (isMatch) {
-                totalFiles++;
-                const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop().toLowerCase() : 'no-ext';
-                extCounts[ext] = (extCounts[ext] || 0) + 1;
-                const meta = State.entryMetadata[entry.fullPath || entry.name];
-                if (meta?.size !== undefined) { totalFileSize += meta.size; }
-                else { try { totalFileSize += (await new Promise(r => entry.file(r))).size; } catch { /* skip */ } }
-            }
-            return true;
-        }, { excludeDots: false });
+        }
+        await walk(roots, '');
 
         Status.hide();
         return { totalFiles, totalFolders, extCounts, totalFileSize, ignoredFolders };
@@ -535,12 +260,12 @@
     function renderStats(stats) {
         const totalIgnored = Object.values(stats.ignoredFolders).reduce((a, b) => a + b, 0);
         const extRows = Object.entries(stats.extCounts).sort((a, b) => b[1] - a[1])
-            .map(([ext, n]) => `<tr><td>${ext}</td><td>${n}</td></tr>`).join('');
+            .map(([ext, n]) => `<tr><td>${escapeHtml(ext)}</td><td>${escapeHtml(String(n))}</td></tr>`).join('');
 
         let ignoredHTML = '';
         if (totalIgnored > 0) {
             const rows = Object.entries(stats.ignoredFolders).sort((a, b) => b[1] - a[1])
-                .map(([name, n]) => `<tr><td>${name}</td><td>${n}</td></tr>`).join('');
+                .map(([name, n]) => `<tr><td>${escapeHtml(name)}</td><td>${escapeHtml(String(n))}</td></tr>`).join('');
             ignoredHTML = `
                 <div style="flex:1">
                     <h3 style="color:var(--text-muted)">Ignored Details</h3>
@@ -582,8 +307,8 @@
             const container = $('vcxproj-preview-content');
             if (!container) return;
 
-            const { projects, fileItems, totalSizeBytes } = data;
-            const config = FileFlow.notebookLM.getExportConfig();
+            const { projects, fileItems, totalSizeBytes, activeFilterLabel } = data;
+            const config = FileFlow.llmExport.getExportConfig();
 
             // Default state
             let currentMode = projects.length > 0 ? 'vcxproj' : 'folder_structure';
@@ -621,7 +346,7 @@
                     <div class="size-presets">
                         <button type="button" class="size-preset-btn ${currentPartSizeMB === 1 ? 'active' : ''}" data-mb="1">1 MB</button>
                         <button type="button" class="size-preset-btn ${currentPartSizeMB === 2 ? 'active' : ''}" data-mb="2">2 MB</button>
-                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 4 ? 'active' : ''}" data-mb="4">4 MB (NotebookLM)</button>
+                        <button type="button" class="size-preset-btn ${currentPartSizeMB === 4 ? 'active' : ''}" data-mb="4">4 MB (LLM)</button>
                         <button type="button" class="size-preset-btn ${currentPartSizeMB === 8 ? 'active' : ''}" data-mb="8">8 MB</button>
                         <button type="button" class="size-preset-btn ${currentPartSizeMB === 16 ? 'active' : ''}" data-mb="16">16 MB</button>
                         <button type="button" class="size-preset-btn ${currentPartSizeMB === 0 ? 'active' : ''}" data-mb="0">分割なし (一括)</button>
@@ -651,13 +376,18 @@
                         <div class="label">推定出力ファイル数</div>
                         <div class="value" id="preview-parts-count">1</div>
                     </div>
+                    ${activeFilterLabel ? `
+                    <div class="stat-box">
+                        <div class="label">適用フィルタ</div>
+                        <div class="value" style="font-size:0.8rem;color:var(--accent-color)">${escapeHtml(activeFilterLabel)}</div>
+                    </div>` : ''}
                 </div>
 
                 <div id="export-mode-view-container"></div>
 
                 <div class="modal-actions-footer">
                     <button class="text-btn outline" id="vcxproj-cancel-btn">Cancel</button>
-                    <button class="text-btn notebooklm-btn" id="vcxproj-execute-btn">Execute Export for LLM</button>
+                    <button class="text-btn llm-export-btn" id="vcxproj-execute-btn">Execute Export for LLM</button>
                 </div>`;
 
             const modal = $('vcxproj-modal');
@@ -693,24 +423,24 @@
                             const srcCount = p.sourceFiles.length;
                             const hdrCount = p.headerFiles.length;
                             const resCount = p.resourceFiles.length;
-                            const configs = p.configurations.length ? p.configurations.join(', ') : 'Default';
+                            const configs = p.configurations.length ? p.configurations.map(escapeHtml).join(', ') : 'Default';
 
                             const definesBadges = p.defines.slice(0, 10).map(d =>
-                                `<span class="tag-badge define-tag" title="${d}">${d}</span>`
+                                `<span class="tag-badge define-tag" title="${escapeAttr(d)}">${escapeHtml(d)}</span>`
                             ).join('') + (p.defines.length > 10 ? `<span class="tag-badge define-tag">+${p.defines.length - 10} more</span>` : '');
 
                             const includeBadges = p.includeDirs.slice(0, 5).map(inc =>
-                                `<span class="tag-badge inc-tag" title="${inc}">${inc}</span>`
+                                `<span class="tag-badge inc-tag" title="${escapeAttr(inc)}">${escapeHtml(inc)}</span>`
                             ).join('') + (p.includeDirs.length > 5 ? `<span class="tag-badge inc-tag">+${p.includeDirs.length - 5} more</span>` : '');
 
                             return `
                                 <div class="vcxproj-card">
                                     <div class="vcxproj-card-header">
                                         <label class="vcxproj-checkbox-label">
-                                            <input type="checkbox" class="vcxproj-select-cb" data-proj-name="${p.name}" checked>
-                                            <span class="vcxproj-name">${p.name}.vcxproj</span>
+                                            <input type="checkbox" class="vcxproj-select-cb" data-proj-name="${escapeAttr(p.name)}" checked>
+                                            <span class="vcxproj-name">${escapeHtml(p.name)}.vcxproj</span>
                                         </label>
-                                        <span class="vcxproj-path" title="${p.path}">${p.path}</span>
+                                        <span class="vcxproj-path" title="${escapeAttr(p.path)}">${escapeHtml(p.path)}</span>
                                     </div>
                                     <div class="vcxproj-card-body">
                                         <div class="vcxproj-stat-row">
@@ -762,7 +492,7 @@
                         <div class="folder-structure-preview-box">
                             <div class="folder-preview-header">
                                 <h4>📁 Physical Folder Structure Overview (OKF Format)</h4>
-                                <span class="folder-preview-note">OKF Frontmatter &amp; ASCII Tree will be automatically prepended to the exported ${currentExt} files.</span>
+                                <span class="folder-preview-note">OKF Frontmatter &amp; ASCII Tree will be automatically prepended to the exported ${escapeHtml(currentExt)} files.</span>
                             </div>
                             <div class="folder-tree-box">
                                 <pre class="ascii-tree-preview">${_buildTreeSnippet(fileItems)}</pre>
@@ -832,7 +562,7 @@
 
                 modal.classList.add('hidden');
                 try {
-                    await FileFlow.notebookLM.exportForNotebookLM({
+                    await FileFlow.llmExport.exportForLLM({
                         selectedProjectNames: selectedNames,
                         mode: currentMode,
                         ext: currentExt,
@@ -894,9 +624,12 @@
 
     FileFlow.ui.Status = Status;
     FileFlow.ui.initModals = initModals;
+    FileFlow.ui.applyActionResult = applyActionResult;
+    FileFlow.ui.renderBadgesInto = renderBadgesInto;
+    FileFlow.ui.TreeHooks = TreeHooks;
     FileFlow.ui.Render = {
         renderFileList, applyFilter: renderFileList,
-        downloadCsv
+        downloadCsv: (...args) => FileFlow.views.List.downloadCsv(...args)
     };
     FileFlow.ui.Stats = {
         async show() {

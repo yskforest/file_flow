@@ -39,7 +39,6 @@
         if (typeof Blob !== 'undefined') {
             return new Blob([bytes], options);
         } else {
-            // Node.js mock blob using a custom API or buffer
             return {
                 size: bytes.length,
                 type: options.type || '',
@@ -81,7 +80,7 @@
     test("Glob.createMatcher — Single Pattern", () => {
         const { Glob } = FileFlow.utils;
         const matcher = Glob.createMatcher("*.js");
-        
+
         assert.ok(matcher("app.js"));
         assert.ok(matcher("utils.JS")); // Case-insensitive
         assert.ok(!matcher("style.css"));
@@ -91,7 +90,7 @@
     test("Glob.createMatcher — Multiple Patterns", () => {
         const { Glob } = FileFlow.utils;
         const matcher = Glob.createMatcher("*.js *.ts, *.tsx");
-        
+
         assert.ok(matcher("main.js"));
         assert.ok(matcher("types.ts"));
         assert.ok(matcher("component.tsx"));
@@ -101,7 +100,7 @@
     test("Glob.createMatcher — Exclude Patterns", () => {
         const { Glob } = FileFlow.utils;
         const matcher = Glob.createMatcher("!*.log !*.tmp");
-        
+
         assert.ok(matcher("app.js"));
         assert.ok(!matcher("error.log"));
         assert.ok(!matcher("temp.tmp"));
@@ -110,7 +109,7 @@
     test("Glob.createMatcher — Include and Exclude Combinations", () => {
         const { Glob } = FileFlow.utils;
         const matcher = Glob.createMatcher("*.js !*.test.js");
-        
+
         assert.ok(matcher("app.js"));
         assert.ok(matcher("utils.js"));
         assert.ok(!matcher("app.test.js"));
@@ -123,36 +122,61 @@
         assert.equal(Glob.createMatcher("   "), null);
     });
 
+    test("Glob.createMatcher — Path Pattern src/**/*.py", () => {
+        const { Glob } = FileFlow.utils;
+        const matcher = Glob.createMatcher("src/**/*.py");
+
+        assert.ok(matcher("a.py", "src/a.py"));
+        assert.ok(matcher("b.py", "src/sub/b.py"));
+        assert.ok(!matcher("c.js", "src/sub/c.js"));
+        assert.ok(!matcher("a.py", "lib/a.py"));
+    });
+
+    test("Glob.createMatcher — Path Exclude", () => {
+        const { Glob } = FileFlow.utils;
+        const matcher = Glob.createMatcher("*.js !src/**/*.test.js");
+
+        assert.ok(matcher("app.js", "src/app.js"));
+        assert.ok(!matcher("app.test.js", "src/app.test.js"));
+        assert.ok(matcher("app.test.js", "lib/app.test.js"));
+    });
+
+    test("Glob.createMatcher — ** matches nested dirs", () => {
+        const { Glob } = FileFlow.utils;
+        const matcher = Glob.createMatcher("**/*.md");
+
+        assert.ok(matcher("readme.md", "readme.md"));
+        assert.ok(matcher("readme.md", "docs/readme.md"));
+        assert.ok(matcher("readme.md", "a/b/c/readme.md"));
+        assert.ok(!matcher("app.js", "a/b/app.js"));
+    });
 
     // ==========================================
     // 2. Encoding and EOL Detection Tests
     // ==========================================
     test("Detect.detectFileInfo — UTF-8 with BOM", async () => {
         const { Detect } = FileFlow.utils;
-        // BOM: EF BB BF + "abc" (61 62 63)
         const file = createMockFile([0xEF, 0xBB, 0xBF, 0x61, 0x62, 0x63]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "UTF-8 (BOM)");
         assert.equal(info.isBinary, false);
     });
 
     test("Detect.detectFileInfo — UTF-16 BE BOM", async () => {
         const { Detect } = FileFlow.utils;
-        // BOM: FE FF + "a" (00 61)
         const file = createMockFile([0xFE, 0xFF, 0x00, 0x61]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "UTF-16 BE");
         assert.equal(info.isBinary, false);
     });
 
     test("Detect.detectFileInfo — UTF-16 LE BOM", async () => {
         const { Detect } = FileFlow.utils;
-        // BOM: FF FE + "a" (61 00)
         const file = createMockFile([0xFF, 0xFE, 0x61, 0x00]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "UTF-16 LE");
         assert.equal(info.isBinary, false);
     });
@@ -161,27 +185,25 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([0x61, 0x62, 0x63, 0x0A]); // abc\n
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "ASCII");
         assert.equal(info.eol, "LF");
     });
 
     test("Detect.detectFileInfo — UTF-8 (No BOM, Japanese)", async () => {
         const { Detect } = FileFlow.utils;
-        // "あ" (E3 81 82)
         const file = createMockFile([0xE3, 0x81, 0x82]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "UTF-8");
         assert.equal(info.isBinary, false);
     });
 
     test("Detect.detectFileInfo — Shift_JIS (Japanese)", async () => {
         const { Detect } = FileFlow.utils;
-        // "あ" in Shift_JIS: 82 A0
         const file = createMockFile([0x82, 0xA0]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "Shift_JIS");
     });
 
@@ -189,7 +211,7 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([0x61, 0x62, 0x00, 0x63]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "Binary");
         assert.equal(info.isBinary, true);
         assert.equal(info.eol, "-");
@@ -199,7 +221,7 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([]);
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.encoding, "Empty");
         assert.equal(info.eol, "None");
         assert.equal(info.isBinary, false);
@@ -209,7 +231,7 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([0x61, 0x0D, 0x0A, 0x62, 0x0D, 0x0A]); // a\r\nb\r\n
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.eol, "CRLF");
     });
 
@@ -217,7 +239,7 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([0x61, 0x0A, 0x62, 0x0A]); // a\nb\n
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.eol, "LF");
     });
 
@@ -225,7 +247,7 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([0x61, 0x0D, 0x62, 0x0D]); // a\rb\r
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.eol, "CR");
     });
 
@@ -233,12 +255,12 @@
         const { Detect } = FileFlow.utils;
         const file = createMockFile([0x61, 0x0D, 0x0A, 0x62, 0x0A]); // CRLF and LF (tied or mixed)
         const info = await Detect.detectFileInfo(file);
-        
+
         assert.equal(info.eol, "Mixed");
     });
 
     // ==========================================
-    // 3. Action System Tests
+    // 3. Action System Tests (DOM-free)
     // ==========================================
     test("RenameAction — shouldApply", () => {
         const { RenameAction } = FileFlow.actions;
@@ -253,38 +275,45 @@
         assert.ok(!actionMd.shouldApply(dir));    // Directory
     });
 
-    test("RenameAction — execute", async () => {
+    test("RenameAction — execute (pure, no DOM)", async () => {
         const { RenameAction } = FileFlow.actions;
         const State = FileFlow.state;
 
-        // Reset state
         State.entryMetadata = {};
-        State.appSettings.viewMode = 'tree';
-
         const actionMd = new RenameAction(".md");
         const file = createMockFileEntry("test.txt", "/root/test.txt", []);
 
-        // Mock DOM element
-        const nameSpan = { textContent: "test.txt" };
-        const mockDiv = {
-            classList: {
-                add(cls) { mockDiv.classes.push(cls); }
-            },
-            querySelector(selector) {
-                if (selector === '.file-name') return nameSpan;
-                return null;
-            },
-            classes: [],
-            downloadName: ""
-        };
+        const res = await actionMd.execute(file);
 
-        await actionMd.execute(mockDiv, file);
-
-        // Verification
+        assert.ok(res.applied);
+        assert.equal(res.newName, "test.txt.md");
         assert.equal(State.entryMetadata["/root/test.txt"].newFilename, "test.txt.md");
-        assert.equal(nameSpan.textContent, "test.txt.md");
-        assert.ok(mockDiv.classes.includes("renamed"));
-        assert.equal(mockDiv.downloadName, "test.txt.md");
+    });
+
+    test("RenameAction — execute legacy (itemDiv, entry) compat", async () => {
+        const { RenameAction } = FileFlow.actions;
+        const State = FileFlow.state;
+        State.entryMetadata = {};
+
+        const actionMd = new RenameAction(".md");
+        const file = createMockFileEntry("a.txt", "/root/a.txt", []);
+        const fakeDiv = { querySelector() { return null; } };
+
+        const res = await actionMd.execute(fakeDiv, file);
+        assert.ok(res.applied);
+        assert.equal(State.entryMetadata["/root/a.txt"].newFilename, "a.txt.md");
+    });
+
+    test("RenameAction — execute skips already-renamed", async () => {
+        const { RenameAction } = FileFlow.actions;
+        const State = FileFlow.state;
+        State.entryMetadata = {};
+
+        const actionMd = new RenameAction(".md");
+        const file = createMockFileEntry("test.md", "/root/test.md", []);
+        const res = await actionMd.execute(file);
+        assert.ok(!res.applied);
+        assert.equal(State.entryMetadata["/root/test.md"], undefined);
     });
 
     test("DetectAction — shouldApply", () => {
@@ -298,78 +327,34 @@
         assert.ok(!action.shouldApply(dir));
     });
 
-    test("DetectAction — execute", async () => {
+    test("DetectAction — execute (pure, no DOM)", async () => {
         const { DetectAction } = FileFlow.actions;
         const State = FileFlow.state;
 
-        // Reset state
         State.entryMetadata = {};
-
         const action = new DetectAction();
-        // File containing ascii content and LF newlines
         const file = createMockFileEntry("test.txt", "/root/test.txt", [0x61, 0x0A, 0x62]);
 
-        // Mock DOM element and document setup
-        const nameSpan = {
-            textContent: "test.txt",
-            after(badgeElement) {
-                mockDiv.badges.push(badgeElement);
-            }
-        };
-        const mockDiv = {
-            querySelectorAll(selector) {
-                if (selector === '.info-badge') {
-                    return {
-                        forEach(cb) {
-                            mockDiv.badges.forEach(cb);
-                            mockDiv.badges = [];
-                        }
-                    };
-                }
-                return [];
-            },
-            querySelector(selector) {
-                if (selector === '.file-name') return nameSpan;
-                return null;
-            },
-            badges: []
-        };
+        const res = await action.execute(file);
 
-        // Standard document creation mock for badge creation
-        const oldCreateElement = typeof document !== 'undefined' ? document.createElement : null;
-        if (typeof document !== 'undefined') {
-            document.createElement = (tag) => {
-                return {
-                    style: {},
-                    textContent: "",
-                    className: ""
-                };
-            };
-        }
+        assert.ok(res.applied);
+        assert.equal(res.encoding, "ASCII");
+        assert.equal(res.eol, "LF");
+        assert.ok(State.entryMetadata["/root/test.txt"].detectionInfo);
+        assert.equal(State.entryMetadata["/root/test.txt"].detectionInfo.encoding, "ASCII");
+    });
 
-        try {
-            await action.execute(mockDiv, file);
-
-            // Verification
-            assert.ok(State.entryMetadata["/root/test.txt"].detectionInfo);
-            assert.equal(State.entryMetadata["/root/test.txt"].detectionInfo.encoding, "ASCII");
-            assert.equal(State.entryMetadata["/root/test.txt"].detectionInfo.eol, "LF");
-
-            if (oldCreateElement) {
-                // Verified HTML elements are added
-                assert.equal(mockDiv.badges.length, 2);
-                assert.equal(mockDiv.badges[0].textContent, "LF");
-                assert.equal(mockDiv.badges[1].textContent, "ASCII");
-            }
-        } finally {
-            if (oldCreateElement) {
-                document.createElement = oldCreateElement;
-            }
-        }
+    test("ActionManager.resolve — mode mapping centralized", () => {
+        const { ActionManager } = FileFlow.actions;
+        assert.ok(ActionManager.resolve('md'));
+        assert.ok(ActionManager.resolve('txt'));
+        assert.ok(ActionManager.resolve('detect'));
+        assert.ok(ActionManager.resolve('.md'));
+        assert.equal(ActionManager.resolve('unknown'), undefined);
     });
 
     // ==========================================
-    // 4. Utility Tests
+    // 4. Utility / State Tests
     // ==========================================
     test("utils.formatBytes", () => {
         const { formatBytes } = FileFlow.utils;
@@ -381,15 +366,114 @@
         assert.equal(formatBytes(1073741824), "1 GiB");
     });
 
+    test("utils.formatBytes — edge cases", () => {
+        const { formatBytes } = FileFlow.utils;
+        assert.equal(formatBytes(-5), "0 Bytes");
+        assert.equal(formatBytes(NaN), "0 Bytes");
+        assert.equal(formatBytes("1024"), "1 KiB");
+    });
+
     test("utils.formatDate", () => {
         const { formatDate } = FileFlow.utils;
         assert.equal(formatDate(null), "-");
         assert.equal(formatDate(undefined), "-");
         assert.equal(formatDate(""), "-");
-        
+
         const testDateStr = "2026-07-15T14:50:00.000Z";
         const expected = new Date(testDateStr).toLocaleString();
         assert.equal(formatDate(testDateStr), expected);
+    });
+
+    test("utils.escapeHtml — XSS safe", () => {
+        const { escapeHtml } = FileFlow.utils;
+        assert.equal(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;');
+        assert.equal(escapeHtml('"quoted" & \'single\''), '&quot;quoted&quot; &amp; &#39;single&#39;');
+        assert.equal(escapeHtml(null), '');
+    });
+
+    test("state.updateMeta — merges and notifies", async () => {
+        const State = FileFlow.state;
+        State.entryMetadata = {};
+        let notified = null;
+        const off = State.subscribe('entryMetadata', (v) => { notified = v; });
+        try {
+            State.updateMeta('/a.txt', { size: 10 });
+            State.updateMeta('/a.txt', { newFilename: 'a.txt.md' });
+            assert.equal(State.entryMetadata['/a.txt'].size, 10);
+            assert.equal(State.entryMetadata['/a.txt'].newFilename, 'a.txt.md');
+            assert.ok(notified);
+        } finally { off(); }
+    });
+
+    test("Entries.buildRelPath — single root strips prefix", () => {
+        const { Entries } = FileFlow.utils;
+        const entry = { name: 'a.py', fullPath: '/root/src/a.py' };
+        assert.equal(Entries.buildRelPath(entry, ['root']), 'src/a.py');
+        assert.equal(Entries.buildRelPath(entry, ['root', 'other']), 'root/src/a.py');
+    });
+
+    // ==========================================
+    // 5. LLM Export Tests
+    // ==========================================
+    test("llmExport — namespace renamed with compat alias", () => {
+        assert.ok(FileFlow.llmExport);
+        assert.equal(FileFlow.notebookLM, FileFlow.llmExport);
+        assert.ok(FileFlow.llmExport.SourceConsolidator);
+        assert.ok(FileFlow.llmExport.VcxprojParser);
+    });
+
+    test("llmExport internals — getExtension/detectLanguage", () => {
+        const t = FileFlow.llmExport._internals;
+        assert.equal(t.getExtension('Engine.cpp'), '.cpp');
+        assert.equal(t.getExtension('noext'), '');
+        assert.equal(t.detectLanguage('a.cpp'), 'cpp');
+        assert.equal(t.detectLanguage('b.py'), 'python');
+        assert.equal(t.detectLanguage('c.unknown'), 'text');
+    });
+
+    test("llmExport internals — fuzzyMatchProject", () => {
+        const t = FileFlow.llmExport._internals;
+        const map = new Map([['c:/proj/src/a.cpp', { projectName: 'P', filter: 'F' }]]);
+        assert.deepEqual(t.fuzzyMatchProject({ name: 'a.cpp' }, map), { projectName: 'P', filter: 'F' });
+        assert.equal(t.fuzzyMatchProject({ name: 'other.cpp' }, map), null);
+    });
+
+    test("llmExport — SourceConsolidator splits by part size", async () => {
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const mk = (rel, text) => ({
+            entry: { name: rel.split('/').pop(), fullPath: '/root/' + rel, file: (ok) => ok(new Blob([text])) },
+            relativePath: rel, projectName: '', filter: '', size: text.length
+        });
+        const items = [mk('src/a.cpp', 'int a;\n'), mk('src/b.cpp', 'int b;\n')];
+        const { results } = await SourceConsolidator.consolidate({
+            fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 1, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.ok(results.length >= 2);
+        assert.ok(results[0].filename.endsWith('.md'));
+        const text = await results[0].blob.text();
+        assert.ok(text.includes('type: codebase_export'));
+        assert.ok(text.includes('## File:'));
+    });
+
+    test("llmExport — CSV generators escape correctly", async () => {
+        const t = FileFlow.llmExport._internals;
+        const items = [{ relativePath: 'a,"b".cpp', projectName: 'P', filter: '', size: 3 }];
+        const csvText = await t.generateTargetFilesCsv(items).text();
+        assert.ok(csvText.includes('"a,""b"".cpp"'));
+        const folders = await t.generateFolderStructureCsv([{ relativePath: 'src/a.cpp', size: 10 }]).text();
+        assert.ok(folders.includes('Folder Path'));
+        assert.ok(folders.includes('src'));
+    });
+
+    test("llmExport — VcxprojParser (browser only)", () => {
+        if (typeof DOMParser === 'undefined') return; // Node.js ではスキップ
+        const { VcxprojParser } = FileFlow.llmExport;
+        const xml = '<?xml version="1.0"?><Project><ItemGroup><ClCompile Include="src\\a.cpp" /></ItemGroup></Project>';
+        const info = VcxprojParser.parseProject(xml, '/root/p.vcxproj');
+        assert.equal(info.name, 'p');
+        assert.deepEqual(info.sourceFiles, ['src/a.cpp']);
     });
 
     // --- Execution Runner ---

@@ -82,14 +82,14 @@
         const radio = document.querySelector(`input[name="action-mode"][value="${State.appSettings.actionMode}"]`);
         if (radio) radio.checked = true;
 
-        // Sync NLM export settings
-        const nlmCfg = State.appSettings.notebookLMConfig || {};
-        const nlmPartSize = $('nlm-max-part-size');
-        if (nlmPartSize) nlmPartSize.value = nlmCfg.maxPartSizeMB || 4;
-        const nlmFileSize = $('nlm-max-file-size');
-        if (nlmFileSize) nlmFileSize.value = nlmCfg.maxSingleFileSizeMB || 1;
-        const nlmExts = $('nlm-extensions');
-        if (nlmExts) nlmExts.value = nlmCfg.sourceExtensions || FileFlow.notebookLM.getDefaultExtensionsString();
+        // Sync LLM export settings (旧 notebookLMConfig から移行)
+        const llmCfg = State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {};
+        const llmPartSize = $('llm-max-part-size');
+        if (llmPartSize) llmPartSize.value = llmCfg.maxPartSizeMB || 4;
+        const llmFileSize = $('llm-max-file-size');
+        if (llmFileSize) llmFileSize.value = llmCfg.maxSingleFileSizeMB || 1;
+        const llmExts = $('llm-extensions');
+        if (llmExts) llmExts.value = llmCfg.sourceExtensions || FileFlow.llmExport.getDefaultExtensionsString();
     }
 
     function updateModeDisplay() {
@@ -155,20 +155,21 @@
         bindCheckbox('exclude-dots-checkbox', 'excludeDots');
         bindCheckbox('show-fullpath-checkbox', 'showFullPath');
 
-        // NLM Export settings change handlers
-        const saveNLMConfig = () => {
-            const cfg = State.appSettings.notebookLMConfig || {};
-            const partSize = $('nlm-max-part-size');
+        // LLM Export settings change handlers
+        const saveLLMConfig = () => {
+            const cfg = State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {};
+            const partSize = $('llm-max-part-size');
             if (partSize) cfg.maxPartSizeMB = parseFloat(partSize.value) || 4;
-            const fileSize = $('nlm-max-file-size');
+            const fileSize = $('llm-max-file-size');
             if (fileSize) cfg.maxSingleFileSizeMB = parseFloat(fileSize.value) || 1;
-            const exts = $('nlm-extensions');
+            const exts = $('llm-extensions');
             if (exts) cfg.sourceExtensions = exts.value;
-            State.appSettings.notebookLMConfig = cfg;
+            State.appSettings.llmExportConfig = cfg;
+            if (State.appSettings.notebookLMConfig) delete State.appSettings.notebookLMConfig;
         };
-        ['nlm-max-part-size', 'nlm-max-file-size', 'nlm-extensions'].forEach(id => {
+        ['llm-max-part-size', 'llm-max-file-size', 'llm-extensions'].forEach(id => {
             const el = $(id);
-            if (el) el.addEventListener('change', saveNLMConfig);
+            if (el) el.addEventListener('change', saveLLMConfig);
         });
 
         // Filter
@@ -190,8 +191,7 @@
 
         // Apply Action
         $('apply-btn').addEventListener('click', async () => {
-            const mode = State.appSettings.actionMode;
-            const action = ActionManager.getAction(mode === 'detect' ? 'detect' : '.' + mode);
+            const action = ActionManager.resolve(State.appSettings.actionMode);
             if (!action) return;
 
             Status.show('Applying action...');
@@ -200,12 +200,18 @@
             const matcher = Glob.createMatcher(State.searchQuery);
             const visibleItems = new Map();
             document.querySelectorAll('.item').forEach(div => {
-                if (div.entry) visibleItems.set(div.entry.fullPath, div);
+                if (div.entry) visibleItems.set(div.entry.fullPath || div.entry.name, div);
             });
+            const rootNames = State.currentRootEntries.map(r => r.name || '');
+            const relOf = (entry) => (FileFlow.utils.Entries && FileFlow.utils.Entries.buildRelPath)
+                ? FileFlow.utils.Entries.buildRelPath(entry, rootNames) || entry.name
+                : entry.name;
 
             await FS.traverse(State.currentRootEntries, async entry => {
-                if (entry.isFile && (!matcher || matcher(entry.name)) && action.shouldApply(entry))
-                    await action.execute(visibleItems.get(entry.fullPath), entry);
+                if (entry.isFile && (!matcher || matcher(entry.name, relOf(entry))) && action.shouldApply(entry)) {
+                    const res = await action.execute(entry);
+                    FileFlow.ui.applyActionResult(entry, visibleItems.get(entry.fullPath || entry.name), res);
+                }
                 return true;
             }, { excludeDots: State.appSettings.excludeDots });
 
@@ -227,9 +233,9 @@
             catch (e) { console.error(e); Status.error('CSV creation failed'); }
         });
 
-        // NotebookLM Export (Preview & Export)
-        $('export-notebooklm-btn').addEventListener('click', async () => {
-            try { await FileFlow.notebookLM.showVcxprojPreviewModal(); }
+        // LLM Export (Preview & Export)
+        $('export-llm-btn').addEventListener('click', async () => {
+            try { await FileFlow.llmExport.showVcxprojPreviewModal(); }
             catch (e) { console.error(e); Status.error('Failed to open VS Projects preview: ' + e.message); }
         });
 

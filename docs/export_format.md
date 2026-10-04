@@ -1,4 +1,4 @@
-# NotebookLM ＆ LLMエージェント向け OKF 準拠ソースコード統合エクスポート仕様書
+# LLMエージェント向け OKF 準拠ソースコード統合エクスポート仕様書
 
 ## 1. 概要 (Overview)
 
@@ -11,7 +11,7 @@
 - **自動判別 ＆ 手動選択**: フォルダドロップ時に `.vcxproj` の有無で初期モードを自動決定。プレビューモーダル上でいつでも切り替え可能。
 - **OKF 準拠構造化フォーマット**: 最先頭に YAML Frontmatter を配置し、各ファイルブロックを YAML メタデータ ＋ 言語別コードフェンス（` ```cpp `, ` ```python ` 等）で厳密に保護。
 - **拡張子選択機能**: 出力形式として `.md` (Markdown) または `.txt` (Text) を選択可能。
-- **自由なファイル分割サイズ**: 1MB, 2MB, 4MB (NotebookLM標準), 8MB, 16MB, カスタムMB指定, または一括（分割なし）を選択可能。
+- **自由なファイル分割サイズ**: 1MB, 2MB, 4MB (LLM標準), 8MB, 16MB, カスタムMB指定, または一括（分割なし）を選択可能。
 - **全パート共通グローバルインデックス**: 複数パートに分割された際にも、全パートのヘッダーに全体のファイル目次 (`[x]` 該当パート / `[ ]` 他パート) を掲載し、LLM が文脈を見失わないよう保護。
 - **メタデータ CSV 同梱**: モードに応じて `vcxproj_list.csv` または `folder_structure.csv` と、全対象明細 `target_files_list.csv` を同梱。
 
@@ -22,7 +22,7 @@
 エクスポート実行時、以下のファイル群を含む ZIP アーカイブがダウンロードされます。
 
 ```
-<root_name>_notebooklm_export.zip
+<root_name>_llm_export.zip
 ├── index.md                          # OKF コードベースインデックス（最初に読み込むべき全体目次）
 ├── <root_name>_src_001_of_003.md    # OKF 統合ソースコード Part 1 (拡張子: .md または .txt)
 ├── <root_name>_src_002_of_003.md    # OKF 統合ソースコード Part 2
@@ -48,7 +48,7 @@
 type: codebase_export
 format_version: "1.0-okf"
 title: "TestEngine Source Code Export (Part 1/3)"
-description: "Consolidated codebase export formatted for NotebookLM and AI agents"
+description: "Consolidated codebase export formatted for LLM agents"
 export_mode: "vcxproj"
 part_number: 1
 total_parts: 3
@@ -181,10 +181,10 @@ generated_at: "2026-08-01T12:00:00Z"
 
 ---
 
-## 6. NotebookLM への推薦利用手順
+## 6. LLM への推薦利用手順
 
 1. エクスポートされた ZIP ファイルを解凍します。
-2. NotebookLM のソース追加画面を開きます。
+2. LLM のソース追加画面を開きます。
 3. **`index.md` を最初のソースとしてアップロード**します（構造コンテキスト）。
 4. 生成された OKF 統合ファイル (`*_src_001_of_XXX.md` または `.txt`) を追加アップロードします。
 5. ディレクトリ構造やプロジェクト定義を確認したい場合は、同梱されている CSV ファイル (`vcxproj_list.csv` または `folder_structure.csv`) も追加ソースとして投入可能です。

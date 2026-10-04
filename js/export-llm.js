@@ -1,6 +1,6 @@
-// FileFlow — NotebookLM & AI Agent OKF Export Module
+// FileFlow — LLM OKF Export Module (vcsproj / folder-structure)
 (function () {
-    const { $, formatBytes, FS, downloadBlob } = FileFlow.utils;
+    const { $, formatBytes, FS, downloadBlob, csvEscape, bomTextBlob, dirnameOf, readEntryFile, normalizeLookupPath, Glob } = FileFlow.utils;
     const State = FileFlow.state;
     const Status = FileFlow.ui.Status;
 
@@ -179,7 +179,7 @@
 
                 let content;
                 try {
-                    const file = await new Promise((res, rej) => item.entry.file(res, rej));
+                    const file = await readEntryFile(item.entry);
                     if (maxSingleFileSize && file.size > maxSingleFileSize) continue; // Skip oversized
                     const buf = await file.arrayBuffer();
                     content = this._decodeToUtf8(new Uint8Array(buf));
@@ -265,7 +265,7 @@
 
                 const body = parts[p].lines.join('');
                 const fullText = frontmatter + header + body;
-                const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), fullText], { type: 'text/markdown;charset=utf-8' });
+                const blob = bomTextBlob(fullText, 'text/markdown;charset=utf-8');
                 const num = String(partNum).padStart(3, '0');
                 const totalNum = String(totalParts).padStart(3, '0');
                 results.push({
@@ -285,7 +285,7 @@
                 'type: codebase_export',
                 'format_version: "1.0-okf"',
                 `title: "${rootName} Source Code Export (Part ${partNum}/${totalParts})"`,
-                'description: "Consolidated codebase export formatted for NotebookLM and AI agents"',
+                'description: "Consolidated codebase export formatted for LLM agents"',
                 `export_mode: "${mode}"`,
                 `part_number: ${partNum}`,
                 `total_parts: ${totalParts}`,
@@ -342,7 +342,7 @@
 
         _buildOKFFileBlock(item, content) {
             const lang = _detectLanguage(item.relativePath);
-            const folderPath = item.relativePath.includes('/') ? item.relativePath.replace(/\/[^/]+$/, '') : '.';
+            const folderPath = dirnameOf(item.relativePath);
             const metaLines = [
                 `path: "${item.relativePath}"`,
                 `folder: "${folderPath}"`
@@ -428,7 +428,7 @@
 
         for (const entry of vcxprojEntries) {
             try {
-                const file = await new Promise((res, rej) => entry.file(res, rej));
+                const file = await readEntryFile(entry);
                 const text = await file.text();
                 const projInfo = VcxprojParser.parseProject(text, entry.fullPath);
 
@@ -437,7 +437,7 @@
                     f.fullPath.replace(f.name, '') === entry.fullPath.replace(entry.name, ''));
                 if (filterEntry) {
                     try {
-                        const filterFile = await new Promise((res, rej) => filterEntry.file(res, rej));
+                        const filterFile = await readEntryFile(filterEntry);
                         const filterText = await filterFile.text();
                         projInfo.filterMap = VcxprojParser.parseFilters(filterText);
                     } catch { /* no filters */ }
@@ -453,7 +453,7 @@
                     ...projInfo.otherFiles
                 ];
                 for (const ref of allRefs) {
-                    const normalized = _normalizePath(projDir + '/' + ref);
+                    const normalized = normalizeLookupPath(projDir + '/' + ref);
                     projectFileMap.set(normalized, {
                         projectName: projInfo.name,
                         filter: projInfo.filterMap[ref.replace(/\\/g, '/')] || ''
@@ -469,14 +469,22 @@
         let totalSizeBytes = 0;
         const isSingleRoot = roots.length === 1 && roots[0].isDirectory;
         const rootPrefix = isSingleRoot ? roots[0].fullPath : '';
+        // ツールバーのGlobフィルタを尊重する（空なら全件）
+        const globMatcher = Glob.createMatcher(State.searchQuery);
+        const activeFilterLabel = State.searchQuery && State.searchQuery.trim()
+            ? `Glob: ${State.searchQuery.trim()}`
+            : null;
 
         for (const entry of allFileEntries) {
             const ext = _getExtension(entry.name);
-            const isSourceTarget = config.sourceExtensions.has(ext);
 
             const relativePath = rootPrefix
                 ? entry.fullPath.replace(rootPrefix + '/', '').replace(rootPrefix, '')
                 : entry.fullPath.replace(/^\//, '');
+
+            if (globMatcher && !globMatcher(entry.name, relativePath)) continue;
+
+            const isSourceTarget = config.sourceExtensions.has(ext);
 
             let fileSize = 0;
             const meta = State.entryMetadata[entry.fullPath];
@@ -484,7 +492,7 @@
                 fileSize = meta.size;
             } else {
                 try {
-                    const file = await new Promise((res, rej) => entry.file(res, rej));
+                    const file = await readEntryFile(entry);
                     fileSize = file.size;
                 } catch { /* ignore */ }
             }
@@ -499,7 +507,7 @@
 
             if (!isSourceTarget) continue;
 
-            const normalizedPath = _normalizePath(entry.fullPath);
+            const normalizedPath = normalizeLookupPath(entry.fullPath);
             const projRef = projectFileMap.get(normalizedPath) || _fuzzyMatchProject(entry, projectFileMap);
 
             totalSizeBytes += fileSize;
@@ -517,7 +525,7 @@
         fileItems.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
         allFilesInfo.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
-        return { projects, fileItems, allFilesInfo, totalSizeBytes };
+        return { projects, fileItems, allFilesInfo, totalSizeBytes, activeFilterLabel };
     }
 
     async function showVcxprojPreviewModal() {
@@ -541,14 +549,14 @@
     }
 
     /**
-     * Main export function for NotebookLM / LLM Agents.
+     * Main export function for LLM agents.
      * @param {object} options
      * @param {Array<string>|null} options.selectedProjectNames
      * @param {string} options.mode - 'vcxproj' | 'folder_structure'
      * @param {string} options.ext - '.md' | '.txt'
      * @param {number} options.maxPartSizeBytes - bytes (0 or Infinity for unsplit)
      */
-    async function exportForNotebookLM(options = {}) {
+    async function exportForLLM(options = {}) {
         const {
             selectedProjectNames = null,
             mode = 'folder_structure',
@@ -639,7 +647,7 @@
             zip.file('target_files_list.csv', targetFilesCsvBlob);
 
             const zipBlob = await zip.generateAsync({ type: 'blob' });
-            downloadBlob(zipBlob, `${rootName}_notebooklm_export.zip`);
+            downloadBlob(zipBlob, `${rootName}_llm_export.zip`);
             Status.show(`Exported ZIP: index.md + ${results.length} part(s) + 2 CSVs (${formatBytes(zipBlob.size)})`);
         } catch (e) {
             console.warn('ZIP creation failed, downloading files individually:', e);
@@ -662,7 +670,7 @@
 
     function _generateVcxprojCsv(projects) {
         const headers = ['Project Name', 'Project Path', 'Configurations', 'Sources', 'Headers', 'Resources', 'Preprocessor Defines', 'Include Directories'];
-        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+        const escape = csvEscape;
 
         const rows = projects.map(p => [
             escape(p.name),
@@ -676,16 +684,16 @@
         ]);
 
         const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
-        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
     }
 
     function _generateFolderStructureCsv(fileItems) {
         const headers = ['Folder Path', 'Parent Folder', 'Depth', 'File Count', 'Total Size (Bytes)'];
-        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+        const escape = csvEscape;
 
         const folderMap = new Map();
         for (const item of fileItems) {
-            const folderPath = item.relativePath.includes('/') ? item.relativePath.replace(/\/[^/]+$/, '') : '.';
+            const folderPath = dirnameOf(item.relativePath);
             if (!folderMap.has(folderPath)) {
                 const parts = folderPath === '.' ? [] : folderPath.split('/');
                 const parentFolder = parts.length > 1 ? parts.slice(0, -1).join('/') : (folderPath === '.' ? '' : '.');
@@ -711,12 +719,12 @@
         ]);
 
         const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
-        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
     }
 
     function _generateTargetFilesCsv(fileItems) {
         const headers = ['File Path', 'Project Name', 'Filter Path', 'Size (Bytes)', 'Extension'];
-        const escape = s => { s = String(s || ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+        const escape = csvEscape;
 
         const rows = fileItems.map(item => [
             escape(item.relativePath),
@@ -727,7 +735,7 @@
         ]);
 
         const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
-        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvText], { type: 'text/csv;charset=utf-8;' });
+        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
     }
 
     // =====================================================================
@@ -750,7 +758,7 @@
         // Build directory stats
         const dirStats = new Map();
         for (const f of allFilesInfo) {
-            const dir = f.relativePath.includes('/') ? f.relativePath.replace(/\/[^/]+$/, '') : '.';
+            const dir = dirnameOf(f.relativePath);
             if (!dirStats.has(dir)) {
                 dirStats.set(dir, { files: 0, exported: 0, binary: 0, size: 0 });
             }
@@ -865,7 +873,7 @@
                 // Aggregate directories
                 const dirCounts = new Map();
                 for (const f of pFiles) {
-                    const dir = f.path.includes('/') ? f.path.replace(/\/[^/]+$/, '') : '.';
+                    const dir = dirnameOf(f.path);
                     dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
                 }
                 const topDirs = [...dirCounts.entries()]
@@ -895,7 +903,7 @@
         lines.push('');
 
         const mdText = lines.join('\n');
-        return new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), mdText], { type: 'text/markdown;charset=utf-8' });
+        return bomTextBlob(mdText, 'text/markdown;charset=utf-8');
     }
 
     // =====================================================================
@@ -979,7 +987,8 @@
     }
 
     function getExportConfig() {
-        const saved = State.appSettings.notebookLMConfig || {};
+        // 旧キー notebookLMConfig からの移行に対応
+        const saved = State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {};
         return {
             mode: saved.mode || DEFAULT_CONFIG.mode,
             ext: saved.ext || DEFAULT_CONFIG.ext,
@@ -1000,15 +1009,7 @@
         return [...DEFAULT_CONFIG.sourceExtensions].join(', ');
     }
 
-    function _normalizePath(p) {
-        const parts = p.replace(/\\/g, '/').split('/');
-        const stack = [];
-        for (const seg of parts) {
-            if (seg === '..') { stack.pop(); }
-            else if (seg !== '.' && seg !== '') { stack.push(seg); }
-        }
-        return stack.join('/').toLowerCase();
-    }
+    // 照合用正規化は core の共有ヘルパーを使用する。
 
     function _getExtension(name) {
         const idx = name.lastIndexOf('.');
@@ -1026,14 +1027,19 @@
     }
 
     // Export Public API
-    FileFlow.notebookLM = {
+    FileFlow.llmExport = {
         scanProjects,
         showVcxprojPreviewModal,
-        exportForNotebookLM,
+        exportForLLM,
         getExportConfig,
         getDefaultExtensionsString,
         VcxprojParser,
         SourceConsolidator,
-        DEFAULT_CONFIG
+        DEFAULT_CONFIG,
+        // テスト用の内部公開（仕様外）
+        _internals: { getExtension: _getExtension, detectLanguage: _detectLanguage, fuzzyMatchProject: _fuzzyMatchProject, detectEntryPoints: _detectEntryPoints,
+            generateTargetFilesCsv: _generateTargetFilesCsv, generateFolderStructureCsv: _generateFolderStructureCsv, generateVcxprojCsv: _generateVcxprojCsv }
     };
+    // 旧名前空間の後方互換エイリアス（移行期間のみ）
+    FileFlow.notebookLM = FileFlow.llmExport;
 })();

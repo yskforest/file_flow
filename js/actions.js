@@ -1,88 +1,77 @@
-// FileFlow — Action System
+// FileFlow — Action System (DOM-free, pure domain logic)
+// 描画への反映は ui.Render.applyActionResult に委譲する。
 (function () {
-    const State = FileFlow.state;
+    'use strict';
 
-    // Base Action
-    class BaseAction {
-        constructor(id, label) { this.id = id; this.label = label; }
-        shouldApply(entry) { return true; }
-        async execute(itemDiv, entry) { throw new Error('Not implemented'); }
+    var State = window.FileFlow.state;
+    var resolveActionId = window.FileFlow.resolveActionId;
+    var C = window.FileFlow.constants;
+
+    function endsWithExt(name, ext) {
+        return String(name || '').toLowerCase().endsWith(String(ext || '').toLowerCase());
     }
 
-    // Registry
+    function normalizeExecuteArgs(a, b) {
+        // 新: execute(entry) / 旧: execute(itemDiv, entry) の両対応。
+        if (b && (b.isFile !== undefined || b.isDirectory !== undefined || b.name !== undefined)) return b;
+        if (a && (a.isFile !== undefined || a.isDirectory !== undefined)) return a;
+        return b || a;
+    }
+
+    class BaseAction {
+        constructor(id, label) { this.id = id; this.label = label; }
+        shouldApply(entry) { return !!entry && !entry.isDirectory; }
+        execute() { return Promise.reject(new Error('Not implemented')); }
+    }
+
     const registry = {};
     const ActionManager = {
-        register(action) { registry[action.id] = action; },
-        getAction(id) { return registry[id]; }
+        register: function (action) { registry[action.id] = action; },
+        getAction: function (id) { return registry[id]; },
+        resolve: function (modeOrId) { return registry[resolveActionId(modeOrId)]; },
+        list: function () { return Object.values(registry); }
     };
-
-    // --- Rename Action (.md / .txt) ---
 
     class RenameAction extends BaseAction {
         constructor(ext) {
-            super(ext, `Add ${ext}`);
+            super(ext, 'Add ' + ext);
             this.ext = ext;
         }
-
         shouldApply(entry) {
-            return !entry.isDirectory && !entry.name.toLowerCase().endsWith(this.ext.toLowerCase());
+            return !!entry && !entry.isDirectory && !endsWithExt(entry.name, this.ext);
         }
-
-        async execute(itemDiv, entry) {
-            if (entry.name.toLowerCase().endsWith(this.ext.toLowerCase())) return;
-
-            const newName = entry.name + this.ext;
-            if (!State.entryMetadata[entry.fullPath]) State.entryMetadata[entry.fullPath] = {};
-            State.entryMetadata[entry.fullPath].newFilename = newName;
-
-            if (itemDiv) {
-                const nameSpan = itemDiv.querySelector('.file-name');
-                if (nameSpan) {
-                    nameSpan.textContent = State.appSettings.viewMode === 'list'
-                        ? nameSpan.textContent + this.ext : newName;
-                }
-                itemDiv.classList.add('renamed');
-                itemDiv.downloadName = newName;
-            }
+        async execute(itemDivOrEntry, maybeEntry) {
+            var entry = normalizeExecuteArgs(itemDivOrEntry, maybeEntry);
+            if (!entry || entry.isDirectory) return { applied: false, reason: 'directory' };
+            if (endsWithExt(entry.name, this.ext)) return { applied: false, reason: 'already-has-ext' };
+            var newName = entry.name + this.ext;
+            var key = entry.fullPath || entry.name;
+            State.updateMeta(key, { newFilename: newName });
+            return { applied: true, newName: newName, key: key };
         }
     }
-
-    // --- Detect Action ---
 
     class DetectAction extends BaseAction {
-        constructor() { super('detect', 'Detect Info'); }
-
-        shouldApply(entry) { return !entry.isDirectory; }
-
-        async execute(itemDiv, entry) {
-            const file = await new Promise((res, rej) => entry.file(res, rej));
-            const { encoding, eol } = await FileFlow.utils.Detect.detectFileInfo(file);
-
-            if (!State.entryMetadata[entry.fullPath]) State.entryMetadata[entry.fullPath] = {};
-            State.entryMetadata[entry.fullPath].detectionInfo = { encoding, eol };
-
-            if (itemDiv) {
-                itemDiv.querySelectorAll('.info-badge').forEach(b => b.remove());
-                const nameSpan = itemDiv.querySelector('.file-name');
-                if (nameSpan) {
-                    const badge = (text, bg, color, ml) => {
-                        const s = document.createElement('span');
-                        s.className = 'info-badge';
-                        s.textContent = text;
-                        s.style.cssText = `background:${bg};color:${color};padding:2px 6px;border-radius:4px;font-size:.75rem;margin-left:${ml}px;font-family:monospace`;
-                        return s;
-                    };
-                    nameSpan.after(badge(eol, 'rgba(168,85,247,.2)', '#c084fc', 4));
-                    nameSpan.after(badge(encoding, 'rgba(56,189,248,.2)', '#38bdf8', 8));
-                }
-            }
+        constructor() { super(C.ACTION_IDS.DETECT, 'Detect Info'); }
+        shouldApply(entry) { return !!entry && !entry.isDirectory; }
+        async execute(itemDivOrEntry, maybeEntry) {
+            var entry = normalizeExecuteArgs(itemDivOrEntry, maybeEntry);
+            if (!entry || entry.isDirectory) return { applied: false, reason: 'directory' };
+            var file = await new Promise(function (res, rej) {
+                try { entry.file(res, rej); } catch (e) { rej(e); }
+            });
+            var info = await window.FileFlow.utils.Detect.detectFileInfo(file);
+            var key = entry.fullPath || entry.name;
+            State.updateMeta(key, { detectionInfo: { encoding: info.encoding, eol: info.eol } });
+            var prev = State.getMeta(key) || {};
+            if (prev.encoding === undefined) State.updateMeta(key, { encoding: info.encoding, eol: info.eol });
+            return { applied: true, key: key, encoding: info.encoding, eol: info.eol };
         }
     }
 
-    // Register
-    ActionManager.register(new RenameAction('.md'));
-    ActionManager.register(new RenameAction('.txt'));
+    ActionManager.register(new RenameAction(C.ACTION_IDS.MD));
+    ActionManager.register(new RenameAction(C.ACTION_IDS.TXT));
     ActionManager.register(new DetectAction());
 
-    FileFlow.actions = { BaseAction, ActionManager, RenameAction, DetectAction };
+    window.FileFlow.actions = { BaseAction, ActionManager, RenameAction, DetectAction };
 })();
