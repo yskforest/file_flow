@@ -1152,7 +1152,7 @@ tr.gridjs-tr.gridjs-tr-selected .grid-filename {
     align-items: center;
 }
 
-.size-preset-btn {
+.size-preset-btn, .count-preset-btn {
     background: var(--card-bg);
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
@@ -1163,12 +1163,12 @@ tr.gridjs-tr.gridjs-tr-selected .grid-filename {
     transition: all 0.2s ease;
 }
 
-.size-preset-btn:hover {
+.size-preset-btn:hover, .count-preset-btn:hover {
     border-color: var(--accent-color);
     color: var(--text-primary);
 }
 
-.size-preset-btn.active {
+.size-preset-btn.active, .count-preset-btn.active {
     background: rgba(56, 189, 248, 0.15);
     border-color: var(--accent-color);
     color: var(--accent-color);

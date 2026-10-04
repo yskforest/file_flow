@@ -110,3 +110,7 @@ namespace Core {
 | `Filter Path` | VS仮想フォルダパス | `Source Files/Core` |
 | `Size (Bytes)` | ファイルサイズ（バイト） | `15234` |
 | `Extension` | ファイル拡張子 | `.cpp` |
+
+---
+
+関連ドキュメント: [export-format.md](export-format.md) / [../requirements.md](../requirements.md) / [export-pipeline.md](export-pipeline.md)

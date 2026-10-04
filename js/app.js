@@ -88,6 +88,8 @@
         if (llmPartSize) llmPartSize.value = llmCfg.maxPartSizeMB || 4;
         const llmFileSize = $('llm-max-file-size');
         if (llmFileSize) llmFileSize.value = llmCfg.maxSingleFileSizeMB || 1;
+        const llmMaxFiles = $('llm-max-files-per-part');
+        if (llmMaxFiles) llmMaxFiles.value = (llmCfg.maxFilesPerPart === 0) ? 0 : (llmCfg.maxFilesPerPart || 1000);
         const llmExts = $('llm-extensions');
         if (llmExts) llmExts.value = llmCfg.sourceExtensions || FileFlow.llmExport.getDefaultExtensionsString();
     }
@@ -164,10 +166,12 @@
             if (fileSize) cfg.maxSingleFileSizeMB = parseFloat(fileSize.value) || 1;
             const exts = $('llm-extensions');
             if (exts) cfg.sourceExtensions = exts.value;
+            const maxFiles = $('llm-max-files-per-part');
+            if (maxFiles) cfg.maxFilesPerPart = Math.max(0, parseInt(maxFiles.value, 10) || 0);
             State.appSettings.llmExportConfig = cfg;
             if (State.appSettings.notebookLMConfig) delete State.appSettings.notebookLMConfig;
         };
-        ['llm-max-part-size', 'llm-max-file-size', 'llm-extensions'].forEach(id => {
+        ['llm-max-part-size', 'llm-max-file-size', 'llm-extensions', 'llm-max-files-per-part'].forEach(id => {
             const el = $(id);
             if (el) el.addEventListener('change', saveLLMConfig);
         });

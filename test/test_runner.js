@@ -476,6 +476,83 @@
         assert.deepEqual(info.sourceFiles, ['src/a.cpp']);
     });
 
+    test("llmExport — assignParts honors size and count limits", () => {
+        const t = FileFlow.llmExport._internals;
+        const items = [
+            { relativePath: 'a.cpp', size: 100 },
+            { relativePath: 'b.cpp', size: 100 },
+            { relativePath: 'c.cpp', size: 100 }
+        ];
+        assert.deepEqual(t.assignParts(items, Infinity, 1), [[0], [1], [2]]);
+        assert.deepEqual(t.assignParts(items, Infinity, Infinity), [[0, 1, 2]]);
+        assert.deepEqual(t.assignParts(items, 700, Infinity), [[0], [1], [2]]);
+        assert.deepEqual(t.assignParts(items, 100000, 2), [[0, 1], [2]]);
+        assert.deepEqual(t.assignParts([], 100, 100), []);
+    });
+
+    test("llmExport — consolidate splits by file count", async () => {
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const mk = (rel, text) => ({
+            entry: { name: rel.split('/').pop(), fullPath: '/root/' + rel, file: (ok) => ok(new Blob([text])) },
+            relativePath: rel, projectName: '', filter: '', size: text.length
+        });
+        const items = [mk('src/a.cpp', 'int a;\n'), mk('src/b.cpp', 'int b;\n'), mk('src/c.cpp', 'int c;\n')];
+        const { results } = await SourceConsolidator.consolidate({
+            fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 100 * 1024 * 1024, maxFilesPerPart: 1, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.equal(results.length, 3);
+        assert.ok(results[0].filename.includes('_001_of_003'));
+    });
+
+    test("llmExport — part contains directory subtree", async () => {
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const mk = (rel, text) => ({
+            entry: { name: rel.split('/').pop(), fullPath: '/root/' + rel, file: (ok) => ok(new Blob([text])) },
+            relativePath: rel, projectName: '', filter: '', size: text.length
+        });
+        const { results } = await SourceConsolidator.consolidate({
+            fileItems: [mk('src/core/a.cpp', 'int a;\n')], projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 0, maxFilesPerPart: 0, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.equal(results.length, 1);
+        const text = await results[0].blob.text();
+        assert.ok(text.includes('Directory Subtree'));
+        assert.ok(text.includes('src/'));
+    });
+
+    test("llmExport — index shards when over limit", async () => {
+        const t = FileFlow.llmExport._internals;
+        FileFlow.state.currentRootEntries = [];
+        const info = [];
+        for (let i = 0; i < 10; i++) {
+            info.push({ relativePath: `src/f${i}.cpp`, size: 100, extension: '.cpp', isExportTarget: true });
+        }
+        const files = t.generateIndexMd({
+            rootName: 'root', mode: 'folder_structure', ext: '.md',
+            allFilesInfo: info, fileItems: info.map(f => ({ ...f, projectName: '', filter: '' })),
+            results: [{ filename: 'x' }], partFileList: [info.map(f => ({ path: f.relativePath, project: '', filter: '', size: 100 }))],
+            projects: [], maxIndexBytes: 700
+        });
+        assert.ok(files.length > 1);
+        assert.equal(files[0].filename, 'index.md');
+        assert.ok(files[1].filename.startsWith('index_files_'));
+        const shardText = await files[1].blob.text();
+        assert.ok(shardText.includes('codebase_index_shard'));
+        assert.ok(shardText.includes('Load `index.md` first'));
+    });
+
+    test("llmExport — getExportConfig defaults maxFilesPerPart", () => {
+        FileFlow.state.appSettings = { llmExportConfig: {} };
+        const cfg = FileFlow.llmExport.getExportConfig();
+        assert.equal(cfg.maxFilesPerPart, 1000);
+        FileFlow.state.appSettings = { llmExportConfig: { maxFilesPerPart: 0 } };
+        assert.equal(FileFlow.llmExport.getExportConfig().maxFilesPerPart, 0);
+        FileFlow.state.appSettings = {};
+    });
+
     // --- Execution Runner ---
     async function run(onStart, onTestResult, onComplete) {
         if (onStart) onStart(tests.length);

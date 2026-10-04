@@ -1,145 +1,123 @@
-# 1. プロジェクト概要 (Project Overview)
-- **アプリ名**: FileFlow (ファイル・フロー)
-- **目的**: サーバー不要でブラウザ上で完結し、フォルダ構造を可視化して、拡張子の一括付与・文字コード検出・ZIP/CSVエクスポートなどの一括処理を行うクライアントサイド完結型ツール。
-- **主なターゲット/利用環境**: ローカル環境の最新ブラウザ（`file://` プロトコルによるHTMLの直接起動や、ローカル簡易サーバー経由での実行）。
+# FileFlow 要求仕様書 (Requirements)
 
-# 2. 技術スタックと制約 (Tech Stack & Constraints)
-エージェントが推測で不要なライブラリやビルドツールを導入しないよう、以下の制約を厳守して実装すること。
+- **アプリ名**: FileFlow（ファイル・フロー）
+- **目的**: サーバー不要でブラウザ上で完結し、フォルダ構造を可視化して、拡張子の一括付与・文字コード検出・ZIP/CSVエクスポート・LLM向けソース統合などの一括処理を行うクライアントサイド完結型ツール。
+- **利用環境**: ローカル環境の最新ブラウザ（`file://` による直接起動、またはローカル簡易サーバー経由）。
 
-- **フロントエンド**: HTML5, CSS (Vanilla, CSS Variablesによるダークテーマ対応), JavaScript (Vanilla, IIFEパターン)
-- **外部ライブラリ**: 
-  - JSZip (v3.10.1) をローカルに配置（`lib/jszip.min.js` を `setup.sh` にて取得して読み込む）
-  - Grid.js をCDN経由で読み込む（`unpkg.com/gridjs`）
-- **ファイル構成**:
-  - `index.html` (エントリーポイント)
-  - `style.css` (UIフレームワークは不使用、生のCSS Variablesで記述)
-  - `js/state.js` (定数・ストア・PubSub・`updateMeta/getMeta`)
-  - `js/utils.js` (汎用ユーティリティ・XSS対策・アイコン)
-  - `js/core.js` (パス対応Glob・FS走査・検出ロジック・Entries・モデル駆動ZIP・CSV/Blob/パス共有ヘルパー)
-  - `js/actions.js` (グローバル名前空間 `window.FileFlow.actions` のアクションクラス群・ActionManager)
-  - `js/views.js` (TreeView/ListView描画)
-  - `js/ui.js` (UIコーディネータ・統計・LLMエクスポートプレビュー)
-  - `js/export-llm.js` (vcxproj解析・OKF統合テキスト・CSV/index.md生成。旧 `notebookLM` 名前空間は互換エイリアス)
-  - `js/app.js` (エントリーポイント、イベントリスナーの登録とオーケストレーション)
-  - `lib/jszip.min.js` (ZIP圧縮ライブラリ)
-- **フォーマット規約**: 
-  - 本アプリでは設定データやモックデータファイル（YAML/JSON等）を直接読み込む仕様はないが、設定項目は `localStorage` に JSON 文字列として永続化する。設定ファイルやモックデータを使用する拡張を行う場合は、json ではなく yml を使用すること。
+個別の詳細仕様は `detailed/` を参照（[出力フォーマット](detailed/export-format.md)・[出力の解釈方法](detailed/ai-format-guide.md)・[検出ヒューリスティクス](detailed/detection.md)・[エクスポートパイプライン](detailed/export-pipeline.md)）。
 
-# 3. コア機能 (Core Features)
-エージェントが実装すべき主要な機能をリストアップする。
+---
 
-1. **フォルダのドラッグ＆ドロップとスキャン**
-   - 画面中央のドロップゾーンにフォルダをドロップすると、`webkitGetAsEntry()` を用いて `FileSystemEntry` として取得し、非同期かつ再帰的に全ファイルをスキャンする。
-2. **ビューモード切り替え (ツリービュー / リストビュー)**
-   - **ツリービュー**: 階層構造をそのまま可視化。フォルダはクリック時に動的に展開（遅延読み込み/Lazy Loading）するため、大量のファイルが含まれるフォルダでも初期表示が高速。
-   - **リストビュー**: スキャンされた全ファイルをフラットな表形式（Grid.js）で表示。ファイル名、サイズ、更新日時、拡張子、エンコーディング、改行コードの6カラムで構成され、カラムフィルタやソートが可能。
-3. **Glob パターンフィルタリング**
-   - ツールバーの入力欄から `.gitignore` ライクなGlobパターン（例: `*.js`, `!node_modules/**`）を入力することで、リアルタイム（300msデバウンス）に対象ファイルをフィルタリングする。
-4. **一括 / 個別アクション適用 (Strategy パターン)**
-   - ファイルクリック時、またはツールバーの `Apply Action` ボタン押下時に、選択中のアクションを適用する。
-     - **Add .md** / **Add .txt**: ファイルに拡張子を追加する仮想リネーム（ZIP生成時および表示名に反映）。
-     - **Detect Info**: ファイル先頭 4KB を読み込み、文字コード（BOM / UTF-8 / Shift_JIS / EUC-JP / ASCII / Other / Binary / Empty）と改行コード（CRLF / LF / CR / Mixed / None）を推定し、バッジ表示する。
-5. **エクスポート (ZIP / CSV)**
-   - **Download ZIP**: フィルタされた現在のフォルダ・ファイル構造をそのままZIP化してダウンロード。リネームアクション適用後のファイル名が適用される。
-   - **Download CSV**: リストビュー表示時にのみ有効。フィルタ・ソートされたファイル一覧を BOM付き UTF-8 CSV 形式でダウンロードする。
-6. **統計情報 (Stats Modal)**
-   - スキャンした全ファイルの合計サイズ、ファイル/フォルダ数、無視されたドットファイル数、拡張子ごとの件数統計テーブルをモーダルで表示する。
-7. **設定管理 (Settings Modal)**
-   - 「ドットファイル/フォルダの除外 (excludeDots)」「リストビューでのフルパス表示 (showFullPath)」などの設定情報を `localStorage` を介して自動永続化する。
-8. **LLM向けソースコード統合エクスポート (LLM Export)**
-   - 大規模Visual Studioプロジェクト（1000万行規模）のソースコードを、LLMが解析可能な統合テキストファイルとして出力する。ツールバーのGlobフィルタと対象拡張子設定が範囲に反映される。
-   - **vcxproj/vcxproj.filters 自動検出・解析**: フォルダドロップ時に `.vcxproj` および `.vcxproj.filters` を自動検出し、XML解析により以下のビルド単位情報を抽出する:
-     - Configuration（Debug/Release等）、Platform
-     - PreprocessorDefinitions（プリプロセッサ定義）
-     - AdditionalIncludeDirectories（インクルードパス）
-     - ソースファイル（ClCompile）、ヘッダファイル（ClInclude）、リソースファイル（ResourceCompile）の分類
-     - フィルタ（仮想フォルダ）パス情報
-   - **vcxproj一覧確認・選択機能 (Preview Modal)**:
-     - エクスポート前に、検出された全 `vcxproj` のプロジェクト名、パス、Configuration、ファイル内訳、プリプロセッサ定義、インクルードパスを一覧モーダルで事前確認可能。
-     - 各 `vcxproj` のチェックボックス選択により、特定のプロジェクトのみを対象にしてエクスポートを実行できる。
-     - 概算ファイル件数、推定合計容量、分割パート数のプレビュー表示。
-   - **ソースコード統合**: 対象拡張子のファイルをファイルパス・プロジェクト帰属・フィルタ情報のメタデータヘッダー付きで統合する。
-   - **サイズ分割**: 出力ファイルを設定可能な上限（デフォルト4MB）以下の単位で分割する。ファイル境界で切断し、同一プロジェクトのファイルをできるだけ同じパートにまとめる。
-   - **メタデータ CSV 出力**:
-     - `vcxproj_list.csv`: 検出・選択された全 `vcxproj` のビルド定義一覧（プロジェクト名、パス、構成、ソース/ヘッダー数、Defines、Includes）を出力。
-     - `target_files_list.csv`: 統合テキストに含まれる対象全ソースファイルの一覧（相対パス、帰属プロジェクト、フィルタパス、サイズ、拡張子）を出力。
-   - **出力仕様書**: `docs/export_format.md` に統合テキストの構文、ヘッダー仕様、分割ルール、およびCSV仕様を明記。
-   - **トークン効率**: LLMが解析精度を維持しつつ、トークン消費を最小化するコンパクトなフォーマットで出力する。
-   - **文字コード変換**: Shift_JIS、EUC-JP等の非UTF-8ファイルを可能な限りUTF-8に変換して出力する。
-   - **設定項目**: 対象拡張子、最大パートサイズ(MB)、最大単一ファイルサイズ(MB) を設定モーダルから変更可能。
+## 1. 技術スタックと制約
 
-# 4. データ構造と状態 (Data Schema & State)
-アプリケーションがメモリ上で保持すべき状態（State）と、扱うデータのスキーマを定義する。
+エージェントが推測で不要なライブラリやビルドツールを導入しないよう、以下を厳守する。
 
-## 4.1 アプリケーションの状態 (State)
-`window.FileFlow.state` で保持される主なメモリ状態は以下の通り：
+- **フロントエンド**: HTML5, CSS (Vanilla, CSS Variablesダークテーマ), JavaScript (Vanilla, IIFEパターン)
+- **外部ライブラリ**:
+  - JSZip (v3.10.1) をローカル配置（`lib/jszip.min.js` を `setup.sh` で取得）
+  - Grid.js をCDN経由で読み込み（`unpkg.com/gridjs`）
+- **ファイル構成**: `index.html` / `style.css` / `js/state.js` / `js/utils.js` / `js/core.js` / `js/actions.js` / `js/views.js` / `js/ui.js` / `js/export-llm.js` / `js/app.js` / `lib/jszip.min.js`（設計は [design.md](design.md)）
+- **フォーマット規約**:
+  - 設定は `localStorage` に JSON 文字列として永続化する。設定ファイルやモックデータを使う拡張では json ではなく yml を使うこと。
 
-- `currentRootEntries` (array): ドロップされたルート要素（`FileSystemEntry` オブジェクト）の配列
-- `appSettings` (object): アプリケーション設定情報
-  - `viewMode` (string): `'tree'` (ツリービュー) または `'list'` (リストビュー)
-  - `actionMode` (string): `'md'` (Add .md) | `'txt'` (Add .txt) | `'detect'` (Detect Info)
-  - `excludeDots` (boolean): ドットファイル/フォルダを除外するかどうかのフラグ
-  - `showFullPath` (boolean): リストビューでファイルのフルパスを表示するかどうかのフラグ
-  - `llmExportConfig` (object): LLMエクスポート設定（旧 `notebookLMConfig` から自動移行）
-    - `maxPartSizeMB` (number): 出力ファイルの最大サイズ（MB、デフォルト: 4）
-    - `maxSingleFileSizeMB` (number): 単一ファイルの最大サイズ（MB、デフォルト: 1）
-    - `sourceExtensions` (string): 対象拡張子のカンマ区切り文字列
-- `entryMetadata` (object): 各ファイルの `fullPath` をキーとするメタデータキャッシュ。スキャンサイズ、日付、検出された文字コード・改行コード、適用されたリネームファイル名などを保持する
-- `searchQuery` (string): ツールバーで入力された現在の検索フィルタキーワード
+## 2. 機能要件
 
-## 4.2 データスキーマ (YAML例)
-以下は、メモリ上で管理される `appSettings` および `entryMetadata` のデータ構造をYAML形式で記述した例である。
+### 2.1 フォルダのドラッグ＆ドロップとスキャン
+
+画面中央のドロップゾーンにフォルダをドロップすると、`webkitGetAsEntry()` で `FileSystemEntry` として取得し、非同期・再帰的に全ファイルをスキャンする。`readEntries()` は一度に全件返さないため空配列まで反復取得し、失敗時は警告のうえ部分結果を返す。
+
+### 2.2 ビューモード切り替え
+
+- **ツリービュー**: 階層構造をそのまま可視化。フォルダはクリック時に初めて子を読み込む遅延読み込みのため、巨大フォルダでも初期表示が高速。
+- **リストビュー**: 全ファイルをフラットテーブル（Grid.js）で表示。Name / Size / Date / Type / Encode / EOL の6カラム。各カラムにフィルタ・ソート用のポップオーバーを搭載する。
+
+### 2.3 Glob パターンフィルタリング
+
+ツールバーの入力欄に `.gitignore` ライクなGlobパターンを記述できる。スペースまたはカンマ区切りで複数指定可能。`/` を含むパターンは相対パスに、含まないパターンはベース名にマッチする。
+
+| 記号 | 意味 | パターン例 | 意味 |
+|---|---|---|---|
+| `*` | 同一階層のみ（`/` を除く） | `*.js` | `.js` のみ表示 |
+| `**` | 階層横断 | `src/**/*.py` | `src/` 配下の `.py` を表示 |
+| `?` | 1文字（`/` を除く） | `!*.log` | `.log` を除外 |
+
+Include（`!` なし）と Exclude（`!` 付き）を組み合わせ可能で、Exclude が優先される。フィルタ結果は ZIP / CSV / アクション適用 / LLMエクスポートの対象範囲に反映される。
+
+### 2.4 一括 / 個別アクション適用
+
+ファイルクリック時、または `Apply Action` ボタン押下時に選択中のアクションを適用する。
+
+| モード | 動作 |
+|---|---|
+| Add `.md` / `.txt` | 仮想リネーム（表示名＋ZIP内ファイル名に反映。実ファイルは不変）。既存の拡張子には適用しない |
+| Detect Info | ファイル先頭 4KB を読み込み、文字コード（BOM / UTF-8 / Shift_JIS / EUC-JP / ASCII / Other / Binary / Empty）と改行コード（CRLF / LF / CR / Mixed / None）を推定してバッジ表示 |
+
+判定ヒューリスティクスの詳細は [detailed/detection.md](detailed/detection.md) を参照。アクション本体はDOM非依存の純粋ロジックとし、描画反映は `ui.applyActionResult` に一元化する。
+
+### 2.5 エクスポート (ZIP / CSV)
+
+- **Download ZIP**: フィルタ後のフォルダ構造を維持したままZIP化する。リネーム適用後のファイル名が反映される。単一フォルダドロップ時はフォルダ名がZIPファイル名になる。未展開のツリーノードも出力対象に含める。
+- **Download CSV**: リストビュー専用。現在のフィルタ・ソート状態のデータを BOM 付き UTF-8 CSV として出力する。
+
+### 2.6 統計情報
+
+スキャン結果の合計サイズ、ファイル/フォルダ数、除外されたドットフォルダ数、拡張子別件数をモーダル表示する。単一走査で集計し、Globフィルタとメタデータキャッシュを再利用する。
+
+### 2.7 設定管理
+
+| 項目 | デフォルト | 説明 |
+|---|---|---|
+| Exclude dotfiles | ✅ ON | `.git` 等のドットファイル/フォルダを除外 |
+| Show full path in List View | ✅ ON | リストビューでフルパス表示 |
+| Max part size (MB) | 4 | LLMエクスポートのパート容量上限 |
+| Max files per part | 1000 | LLMエクスポートのパート件数上限（0=無制限） |
+| Max single file size (MB) | 1 | LLMエクスポートの単一ファイル上限 |
+| Target extensions | 既定セット | LLMエクスポートの対象拡張子 |
+
+設定は `localStorage` に自動永続化される。
+
+### 2.8 LLM向けソースコード統合エクスポート
+
+大規模プロジェクトのソースコードを、LLMが解析可能なOKF準拠の統合テキストとして出力する。
+
+- **vcxproj/vcxproj.filters 自動検出・解析**: Configuration、Platform、PreprocessorDefinitions、AdditionalIncludeDirectories、ClCompile / ClInclude / ResourceCompile の分類、フィルタ（仮想フォルダ）パスを抽出する。
+- **プレビュー**: 検出プロジェクトの一覧・ビルド定義・件数・概算容量・推定パート数（律速要因付き）を事前確認し、対象プロジェクトを選択できる。
+- **範囲**: ツールバーのGlobフィルタと対象拡張子設定が反映される。
+- **分割**: パート容量上限とパート件数上限の厳しい方で、ファイル境界で分割する。
+- **構造保持**: 各パートにファイル目次＋ディレクトリサブツリーを同梱し、全体索引は `index.md`（肥大時は `index_files_*` に自動分割）に集約する。
+- **メタデータCSV**: `vcxproj_list.csv`（または `folder_structure.csv`）と `target_files_list.csv` を同梱する。
+- **文字コード変換**: Shift_JIS、EUC-JP等の非UTF-8ファイルを可能な限りUTF-8に変換する。
+
+出力フォーマットの詳細は [detailed/export-format.md](detailed/export-format.md)、出力の解釈方法は [detailed/ai-format-guide.md](detailed/ai-format-guide.md)、処理フローの詳細は [detailed/export-pipeline.md](detailed/export-pipeline.md) を参照。
+
+## 3. データ構造と状態
+
+`window.FileFlow.state` が保持する主な状態：
+
+- `currentRootEntries`: ドロップされたルート要素（`FileSystemEntry`）の配列
+- `appSettings`: `viewMode` / `actionMode` / `excludeDots` / `showFullPath` / `llmExportConfig`（`maxPartSizeMB` 既定4、`maxFilesPerPart` 既定1000（0=無制限）、`maxSingleFileSizeMB` 既定1、`sourceExtensions`）
+- `entryMetadata`: `fullPath` をキーとするメタデータキャッシュ（サイズ・日時・文字コード・改行コード・リネーム後名など。更新は `updateMeta` 経由）
+- `searchQuery`: 現在のフィルタクエリ
 
 ```yaml
-# アプリケーションの永続化設定 (localStorage['FileFlowSettings']) の YAML 表現例
 appSettings:
-  viewMode: "tree"       # 画面描画モード ('tree' | 'list')
-  actionMode: "md"       # アクション適用モード ('md' | 'txt' | 'detect')
-  excludeDots: true      # ドットファイル/フォルダ除外フラグ (true/false)
-  showFullPath: true     # リストビューでのフルパス表示フラグ (true/false)
+  viewMode: "tree"
+  actionMode: "md"
+  excludeDots: true
+  showFullPath: true
   llmExportConfig:
-    maxPartSizeMB: 4           # 出力ファイルの最大サイズ（MB）
-    maxSingleFileSizeMB: 1     # 単一ファイルの最大サイズ（MB）
-    sourceExtensions: ".cpp, .h, .c, .hpp, .cs, ..."  # 対象拡張子
-
-# メモリ上で保持・蓄積されるファイルメタデータ (entryMetadata) の YAML 表現例
-entryMetadata:
-  "/root/docs/readme.txt":
-    size: 2048
-    date: "2026-07-15T14:50:00.000Z"
-    encoding: "UTF-8"
-    eol: "LF"
-    newFilename: "readme.txt.md"
-    detectionInfo:
-      encoding: "UTF-8"
-      eol: "LF"
+    maxPartSizeMB: 4
+    maxFilesPerPart: 1000
+    maxSingleFileSizeMB: 1
+    sourceExtensions: ".cpp, .h, .c, .hpp, .cs, ..."
 ```
 
-# 5. 受け入れ条件 (Acceptance Criteria)
-アプリケーションの動作検証時、以下の項目がすべて満たされていることを確認すること。
+## 4. 受け入れ条件
 
-- **ローカル完結動作**:
-  - `file://` プロトコルによる `index.html` の直接起動（ダブルクリック）で、すべての機能（スキャン、表示、フィルタ、アクション適用、エクスポート）が正常に動作すること。
-- **フォルダスキャン機能**:
-  - ドロップされたフォルダの全ファイルを非同期・再帰的に走査し、進捗ダイアログが完了後にファイルツリー/リストとして正しく表示されること。
-  - 大規模なフォルダ構造であっても、ツリービューの遅延読み込み（Lazy Loading）とリストビューの分割スキャン（Chunk Processing）によりブラウザがフリーズしないこと。
-- **Glob フィルタリング**:
-  - `*.js` や `!node_modules/**` などの複数パターンに対応した Glob フィルタがリアルタイム（デバウンス経由）で評価され、表示される要素が動的に絞り込まれること。
-- **アクション機能**:
-  - `Add .md` / `Add .txt` が適用された際、表示されているファイル名と ZIP エクスポート用のファイル名が変更されること（ローカルファイル自体は変更しない）。
-  - `Detect Info` が適用された際、ファイル先頭 4KB を解析して「文字コード」および「改行コード（EOL）」が自動推定され、画面上にバッジとして正しく表示されること。
-- **エクスポート機能**:
-  - **ZIPダウンロード**: フィルタにより表示中のファイル群が、アクション適用後のファイル名および元のフォルダ構造を維持した状態で正しくZIPファイルとして生成・ダウンロードされること。
-  - **CSVダウンロード**: リストビュー選択時に、現在のフィルタおよびソート状態に合わせた表データが、BOM付き UTF-8 CSV として正しくエクスポートされること。
-- **LLM エクスポート機能**:
-  - 「Export for LLM」ボタン押下時に、対象拡張子のソースファイルが統合テキストファイルとして出力されること。
-  - vcxproj ファイルが検出された場合、ビルド単位情報（Configuration、Defines、IncludeDirs、ソース/ヘッダ分類、フィルタパス）が出力に含まれること。
-  - 各出力ファイルが設定された最大サイズ（デフォルト4MB）以下であること。
-  - ファイルの途中で切断されないこと（ファイル境界での分割）。
-  - 複数パートの場合はZIPにまとめてダウンロードされること。
-  - 各パートにファイルインデックス（目次）が含まれること。
-  - 非UTF-8ファイル（Shift_JIS等）が正しくUTF-8に変換されて出力されること。
-- **永続化と統計情報**:
-  - 除外設定等の変更内容が `localStorage` に保存され、ページ再読み込み時にも状態が復元されること。
-  - 統計情報モーダルに、全ファイルサイズ、総ファイル数/フォルダ数、無視された件数、および拡張子ごとの件数テーブルが正確に集計されて表示されること。
-
+- **ローカル完結動作**: `file://` での直接起動ですべての機能が動作すること。
+- **フォルダスキャン**: 全ファイルを非同期・再帰的に走査し完了後に正しく表示すること。大規模構造でも遅延読み込み＋分割処理でフリーズしないこと。
+- **Globフィルタリング**: 複数パターンがデバウンス経由でリアルタイム評価され表示が絞り込まれること。
+- **アクション**: `.md`/`.txt` 適用で表示名とZIP内ファイル名が変わること（実ファイル不変）。Detect Infoで文字コード・改行コードが推定表示されること。
+- **エクスポート**: フィルタ後の構造・適用後ファイル名を維持したZIP、フィルタ・ソート反映のBOM付きUTF-8 CSVが出力されること。
+- **LLMエクスポート**: 対象ソースが統合テキストとして出力され、vcxproj検出時はビルド単位情報を含むこと。各出力が上限（容量・件数）内に収まり、ファイル境界で分割されること。複数パートはZIP化され、各パートに目次が含まれること。非UTF-8はUTF-8に変換されること。
+- **永続化と統計**: 設定が再読み込み後も復元されること。統計モーダルの集計が正確であること。

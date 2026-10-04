@@ -94,6 +94,10 @@
                     <input type="number" id="llm-max-file-size" class="setting-input-sm" value="1" min="0.1" max="10" step="0.1">
                 </div>
                 <div class="setting-item-block">
+                    <label class="setting-label">Max files per part (0 = unlimited)</label>
+                    <input type="number" id="llm-max-files-per-part" class="setting-input-sm" value="1000" min="0" max="100000" step="50">
+                </div>
+                <div class="setting-item-block">
                     <label class="setting-label">Target extensions (comma separated)</label>
                     <textarea id="llm-extensions" class="setting-textarea" rows="3"></textarea>
                 </div>
@@ -316,6 +320,7 @@
             let currentPartSizeMB = config.maxPartSizeBytes
                 ? config.maxPartSizeBytes / (1024 * 1024)
                 : 4;
+            let currentMaxFiles = Number.isFinite(config.maxFilesPerPart) ? config.maxFilesPerPart : 1000;
 
             // Render container shell
             container.innerHTML = `
@@ -353,6 +358,21 @@
                         <div class="custom-size-wrapper">
                             <input type="number" id="custom-part-mb-input" class="custom-mb-input" placeholder="カスタム" min="1" max="500" value="${[1,2,4,8,16,0].includes(currentPartSizeMB) ? '' : currentPartSizeMB}">
                             <span class="mb-unit">MB</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="export-size-bar">
+                    <label class="option-label">パートあたり上限ファイル数 (Max Files / Part)</label>
+                    <div class="size-presets">
+                        <button type="button" class="count-preset-btn ${currentMaxFiles === 100 ? 'active' : ''}" data-count="100">100</button>
+                        <button type="button" class="count-preset-btn ${currentMaxFiles === 500 ? 'active' : ''}" data-count="500">500</button>
+                        <button type="button" class="count-preset-btn ${currentMaxFiles === 1000 ? 'active' : ''}" data-count="1000">1000</button>
+                        <button type="button" class="count-preset-btn ${currentMaxFiles === 2500 ? 'active' : ''}" data-count="2500">2500</button>
+                        <button type="button" class="count-preset-btn ${currentMaxFiles === 0 ? 'active' : ''}" data-count="0">制限なし</button>
+                        <div class="custom-size-wrapper">
+                            <input type="number" id="custom-count-input" class="custom-mb-input" placeholder="カスタム" min="1" max="100000" value="${[100,500,1000,2500,0].includes(currentMaxFiles) ? '' : currentMaxFiles}">
+                            <span class="mb-unit">件</span>
                         </div>
                     </div>
                 </div>
@@ -401,13 +421,15 @@
 
                 modeNameEl.textContent = currentMode === 'vcxproj' ? 'vcxproj (VS Proj)' : 'フォルダ構造';
 
-                // Recalculate parts count
+                // Recalculate parts count（容量制限と件数制限の厳しい方）
                 const partSizeBytes = currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : Infinity;
-                const estParts = (currentPartSizeMB === 0 || partSizeBytes === Infinity)
-                    ? 1
-                    : Math.max(1, Math.ceil(totalSizeBytes / partSizeBytes));
+                const estBytes = totalSizeBytes + fileItems.length * 512;
+                const estBySize = partSizeBytes === Infinity ? 1 : Math.max(1, Math.ceil(estBytes / partSizeBytes));
+                const estByCount = currentMaxFiles > 0 ? Math.max(1, Math.ceil(fileItems.length / currentMaxFiles)) : 1;
+                const estParts = fileItems.length === 0 ? 0 : Math.max(estBySize, estByCount);
+                const boundBy = estByCount > estBySize ? '件数制限' : '容量制限';
 
-                partsCountEl.textContent = estParts > 1 ? `${estParts} ファイル (.zip)` : `1 ファイル`;
+                partsCountEl.textContent = estParts > 1 ? `約${estParts} ファイル (${boundBy})` : `1 ファイル`;
 
                 // Render mode content view
                 if (currentMode === 'vcxproj') {
@@ -553,6 +575,31 @@
                 });
             }
 
+            // Count presets
+            modal.querySelectorAll('.count-preset-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    modal.querySelectorAll('.count-preset-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentMaxFiles = parseInt(btn.getAttribute('data-count'), 10);
+                    const customCount = modal.querySelector('#custom-count-input');
+                    if (customCount) customCount.value = '';
+                    updatePreview();
+                });
+            });
+
+            // Custom count input
+            const customCount = modal.querySelector('#custom-count-input');
+            if (customCount) {
+                customCount.addEventListener('input', () => {
+                    const val = parseInt(customCount.value, 10);
+                    if (!isNaN(val) && val > 0) {
+                        modal.querySelectorAll('.count-preset-btn').forEach(b => b.classList.remove('active'));
+                        currentMaxFiles = val;
+                        updatePreview();
+                    }
+                });
+            }
+
             // Execute export button
             modal.querySelector('#vcxproj-execute-btn').addEventListener('click', async () => {
                 const selectedCbs = [...modal.querySelectorAll('.vcxproj-select-cb:checked')];
@@ -566,7 +613,8 @@
                         selectedProjectNames: selectedNames,
                         mode: currentMode,
                         ext: currentExt,
-                        maxPartSizeBytes: currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : 0
+                        maxPartSizeBytes: currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : 0,
+                        maxFilesPerPart: currentMaxFiles
                     });
                 } catch (err) {
                     console.error('Export error:', err);
