@@ -381,6 +381,10 @@
                     </div>
                 </div>
 
+                <div class="export-size-bar">
+                    <div class="folder-preview-note">全出力ファイルは50万語未満になるよう自動分割されます（本文・index・CSV共通）。</div>
+                </div>
+
                 <div class="stats-summary vcxproj-summary">
                     <div class="stat-box">
                         <div class="label">選択モード</div>
@@ -425,13 +429,16 @@
 
                 modeNameEl.textContent = currentMode === 'vcxproj' ? 'vcxproj (VS Proj)' : 'フォルダ構造';
 
-                // Recalculate parts count（容量制限と件数制限の厳しい方）
+                // Recalculate parts count（容量制限・単語数制限・件数制限の厳しい方）
                 const partSizeBytes = currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : Infinity;
                 const estBytes = totalSizeBytes + fileItems.length * 512;
                 const estBySize = partSizeBytes === Infinity ? 1 : Math.max(1, Math.ceil(estBytes / partSizeBytes));
+                const wordTarget = (FileFlow.llmExport && FileFlow.llmExport.OUTPUT_WORD_TARGET) || 450000;
+                const estWords = Math.ceil(totalSizeBytes / 5) + fileItems.length * 100;
+                const estByWords = Math.max(1, Math.ceil(estWords / wordTarget));
                 const estByCount = currentMaxFiles > 0 ? Math.max(1, Math.ceil(fileItems.length / currentMaxFiles)) : 1;
-                const estParts = fileItems.length === 0 ? 0 : Math.max(estBySize, estByCount);
-                const boundBy = estByCount > estBySize ? '件数制限' : '容量制限';
+                const estParts = fileItems.length === 0 ? 0 : Math.max(estBySize, estByWords, estByCount);
+                const boundBy = estParts === estByWords && estByWords >= estBySize && estByWords >= estByCount ? '単語数制限 (50万語)' : estByCount > estBySize ? '件数制限' : '容量制限';
 
                 partsCountEl.textContent = estParts > 1 ? `約${estParts} ファイル (${boundBy})` : `1 ファイル`;
 

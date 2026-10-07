@@ -38,6 +38,16 @@
     const PARTS_MAP_MAX = 32;
     // チャンク分割時に確保するヘッダー予備バイト数
     const CHUNK_RESERVED_BYTES = 8192;
+    // 出力1ファイルあたりの単語数ハード上限（この値未満を保証する。NotebookLM/Gemini Notebook の 500,000 words/source に準拠）
+    const MAX_OUTPUT_WORDS = 500000;
+    // 割付時の単語数ターゲット（ヘッダ誤差分のマージンを確保）
+    const OUTPUT_WORD_TARGET = 450000;
+    // フロントマター+ヘッダ分の概算リザーブ（単語数）
+    const OUTPUT_WORD_RESERVE = 20000;
+    // 単一OKFブロックの単語数上限（ヘッダと同居させるための予算）
+    const SINGLE_BLOCK_WORD_BUDGET = 350000;
+    // index後続シャードのヘッダ概算（単語数）
+    const INDEX_SHARD_HEAD_EST_WORDS = 200;
 
     /**
      * 本文を行単位でチャンク分割する（巨大単一ファイル対策）。
@@ -83,6 +93,100 @@
         return chunks.length ? chunks : [content];
     }
 
+    // CJK 文字の範囲（ひらがな・カタカナ・漢字・ハングル・全角英数など）
+    const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯！-～]/g;
+
+    /**
+     * 単語数を数える。NotebookLM の 500,000 words 制限に対応するための推定値。
+     * 空白区切りトークン数 + CJK文字数（日本語は分かち書きしないため1字=1語として保守的に加算）。
+     * 英語コードでは空白トークン数が支配的、日本語ではCJK加算が支配的になる。
+     * @returns {number}
+     */
+    function countWords(text) {
+        if (!text) return 0;
+        const cjk = (String(text).match(CJK_RE) || []).length;
+        const tokens = (String(text).match(/\S+/g) || []).length;
+        return tokens + cjk;
+    }
+
+    /**
+     * 本文を単語数予算でチャンク分割する（巨大単一ファイル対策）。
+     * 改行込みセグメント単位で分割し、結合で完全復元できる。
+     * 予算内に収まらない1行は単語ラン単位で切断し、空白なし長大ラン（CJK等）は文字単位で切断する。
+     * @returns {Array<string>}
+     */
+    function _splitContentByWords(content, budgetWords) {
+        if (!Number.isFinite(budgetWords)) return [content];
+        const budget = Math.max(Math.floor(budgetWords), 64);
+        if (countWords(content) <= budget) return [content];
+        const segs = content.match(/[^\n]*\n|[^\n]+$/g) || [content];
+        const chunks = [];
+        let cur = '';
+        let curW = 0;
+        const flush = () => { if (cur) { chunks.push(cur); cur = ''; curW = 0; } };
+        const pushRunSliced = (run) => {
+            // 空白なし長大ラン（CJK等）は文字単位で切断（1字≒1語とみなす）
+            const cps = Array.from(run);
+            for (let i = 0; i < cps.length; i += budget) chunks.push(cps.slice(i, i + budget).join(''));
+        };
+        const splitRuns = (seg) => {
+            // 先頭空白を落とさないよう位置追跡しながら単語ランに分解する
+            const runs = [];
+            const re = /\S+\s*/g;
+            let pos = 0;
+            let m;
+            re.lastIndex = 0;
+            while ((m = re.exec(seg)) !== null) {
+                if (m.index > pos) runs.push(seg.slice(pos, m.index));
+                runs.push(m[0]);
+                pos = m.index + m[0].length;
+                if (m[0].length === 0) break;
+            }
+            if (pos < seg.length) runs.push(seg.slice(pos));
+            if (!runs.length) runs.push(seg);
+            return runs;
+        };
+        for (const seg of segs) {
+            const w = countWords(seg);
+            if (w > budget) {
+                flush();
+                const runs = splitRuns(seg);
+                let piece = '';
+                let pw = 0;
+                const flushPiece = () => { if (piece) { chunks.push(piece); piece = ''; pw = 0; } };
+                for (const run of runs) {
+                    const rw = countWords(run);
+                    if (rw > budget) { flushPiece(); pushRunSliced(run); continue; }
+                    if (pw + rw > budget && piece) flushPiece();
+                    piece += run;
+                    pw += rw;
+                }
+                flushPiece();
+                continue;
+            }
+            if (curW + w > budget) flush();
+            cur += seg;
+            curW += w;
+        }
+        flush();
+        return chunks.length ? chunks : [content];
+    }
+
+    /**
+     * バイト予算と単語数予算の両方を満たすようチャンク分割する。
+     * @returns {Array<string>}
+     */
+    function _splitContentDualWords(content, budgetBytes, budgetWords, encoder) {
+        const first = _splitContent(content, budgetBytes, encoder);
+        if (!Number.isFinite(budgetWords)) return first;
+        const out = [];
+        for (const piece of first) {
+            if (countWords(piece) <= budgetWords) { out.push(piece); continue; }
+            for (const sub of _splitContentByWords(piece, budgetWords)) out.push(sub);
+        }
+        return out.length ? out : [content];
+    }
+
     /**
      * 除外パターン（生成物ノイズ除去用）のマッチャーを生成する。空なら null。
      * 既存のパス対応Globを再利用する。
@@ -94,15 +198,20 @@
     }
 
     /**
-     * 事前割付（I/Oなし）: バイト数と件数の二重制限でファイル群をパートに振り分ける。
+     * 事前割付（I/Oなし）: バイト数・単語数・件数の三重制限でファイル群をパートに振り分ける。
+     * 単語数見積りはバイト数で代用する（1語は最低1バイトのため安全側の上限になる）。
+     * effectiveWordLimit が非有限・未指定の場合は単語数制限を適用しない（後方互換）。
      * @returns {Array<Array<number>>} fileItems へのインデックス配列の配列
      */
-    function assignParts(fileItems, effectivePartSize, effectiveMaxFiles) {
+    function assignParts(fileItems, effectivePartSize, effectiveMaxFiles, effectiveWordLimit) {
         const groups = [];
         let cur = [];
         let curSize = 0;
+        let curEst = 0;
+        const hasWordLimit = Number.isFinite(effectiveWordLimit);
         const fits = (est) =>
             (effectivePartSize === Infinity || curSize + est <= effectivePartSize) &&
+            (!hasWordLimit || curEst + est <= effectiveWordLimit) &&
             (effectiveMaxFiles === Infinity || cur.length < effectiveMaxFiles);
         fileItems.forEach((item, idx) => {
             const est = (item.size || 0) + BLOCK_OVERHEAD_EST;
@@ -110,9 +219,11 @@
                 groups.push(cur);
                 cur = [];
                 curSize = 0;
+                curEst = 0;
             }
             cur.push(idx);
             curSize += est;
+            curEst += est;
         });
         if (cur.length) groups.push(cur);
         return groups;
@@ -160,6 +271,28 @@
         })(root, '', 1);
         if (truncated) lines.push(`... (${sorted.length} paths total, truncated to ${maxLines} lines)`);
         return lines.join('\n');
+    }
+
+    /**
+     * index後続シャードのヘッダを生成する。
+     */
+    function _buildIndexShardHead(rootName, shardNum, totalShards) {
+        return [
+            '---',
+            'type: codebase_index_shard',
+            'format_version: "1.0-okf"',
+            `title: "${rootName} — Codebase Index (Files ${shardNum}/${totalShards})"`,
+            `index_of: "index.md"`,
+            `shard_number: ${shardNum}`,
+            `total_shards: ${totalShards}`,
+            `generated_at: "${new Date().toISOString()}"`,
+            '---',
+            '',
+            `# ${rootName} — Codebase Index (Files Shard ${shardNum}/${totalShards})`,
+            '',
+            '> Continuation of the All Files table. Load `index.md` first for structural context.',
+            '',
+        ].join('\n') + '\n';
     }
 
     // =====================================================================
@@ -278,9 +411,10 @@
 
         /**
          * Consolidate files into OKF-compliant Markdown / Text files.
-         * 2フェーズ構成: (1) I/Oなし事前割付で totalParts を確定
-         * (2) パート単位ストリーミング生成（完了パートは即Blob化し文字列を破棄）。
-         * 1000万行級でも同時保持は「1パート分+結果Blob群」に抑えられる。
+         * 3フェーズ構成: (1) I/Oなし事前割付（バイト・単語・件数）
+         * (2) グループ単位で読み込み→ブロック化→単語数/バイトでサブパートへ再梱包
+         * (3) 実測検証（全出力が50万語未満になるまで超過パートを半分に再分割）。
+         * ユーザのバイト設定が大きくても単語数上限が優先され、必ず50万語未満になる。
          * @param {object} opts
          * @param {Array} opts.fileItems
          * @param {Array} opts.projects
@@ -302,28 +436,40 @@
                 ? fileItems.filter(item => !(item.size > maxSingleFileSize))
                 : fileItems.slice();
 
-            // Phase 1: 事前割付（totalParts 確定）
-            const groups = assignParts(targets, effectivePartSize, effectiveMaxFiles);
-            const totalParts = Math.max(groups.length, 1);
+            // Phase 1: 事前割付（バイト・単語・件数の三重制限）
+            const groups = assignParts(targets, effectivePartSize, effectiveMaxFiles, OUTPUT_WORD_TARGET);
             const rootName = State.currentRootEntries.length === 1
                 ? State.currentRootEntries[0].name : 'project';
             const cleanExt = ext.startsWith('.') ? ext : '.' + ext;
             const entryPoints = _detectEntryPoints(targets);
 
-            const results = [];
-            const partFileList = [];
-            let done = 0;
-
-            // Phase 2: パート単位ストリーミング
-            const chunkBudget = effectivePartSize === Infinity
+            // Phase 2: グループ単位ストリーミング読み込み→サブパートへ再梱包
+            // グループはI/Oバッチの区切りであり、パート境界にはしない（末尾の微小パートを出さないよう梱包状態をグループ跨ぎで継続する）
+            const chunkByteBudget = effectivePartSize === Infinity
                 ? Infinity
                 : effectivePartSize - CHUNK_RESERVED_BYTES;
-            for (let p = 0; p < groups.length; p++) {
-                const partNum = p + 1;
-                const lines = [];
-                const partFiles = [];
+            const bodyWordBudget = OUTPUT_WORD_TARGET - OUTPUT_WORD_RESERVE;
+            const bodyByteBudget = effectivePartSize === Infinity
+                ? Infinity
+                : effectivePartSize - CHUNK_RESERVED_BYTES;
+            const hasCountLimit = Number.isFinite(effectiveMaxFiles) && effectiveMaxFiles !== Infinity;
+            let subParts = []; // { blocks: Array<string>, files: Array, bodyWords: number, bodyBytes: number }
+            let done = 0;
+            let cur = { blocks: [], files: [], bodyWords: 0, bodyBytes: 0 };
+            let curFileCount = 0;
+            let curLastGlobal = -1;
+            const flushCur = () => {
+                if (cur.blocks.length) subParts.push(cur);
+                cur = { blocks: [], files: [], bodyWords: 0, bodyBytes: 0 };
+                curFileCount = 0;
+                curLastGlobal = -1;
+            };
 
-                for (const idx of groups[p]) {
+            for (let gi = 0; gi < groups.length; gi++) {
+                const tmpBlocks = [];
+                const tmpFiles = [];
+
+                for (const idx of groups[gi]) {
                     const item = targets[idx];
                     if (onProgress && done % 50 === 0) {
                         onProgress(done, targets.length);
@@ -342,32 +488,81 @@
                     }
 
                     // RAG対策: パート上限を超える単一ファイルはチャンク分割し、
-                    // 各断片にパス付き見出しを付けて帰属を保持する
-                    const pieces = _splitContent(content, chunkBudget, encoder);
-                    pieces.forEach((piece, k) => {
-                        const chunkLabel = pieces.length > 1 ? `split ${k + 1}/${pieces.length}` : null;
-                        lines.push(this._buildOKFFileBlock(item, piece, { chunkLabel }));
-                        partFiles.push({
-                            path: item.relativePath,
-                            project: item.projectName || '',
-                            filter: item.filter || '',
-                            size: content.length,
-                            globalIndex: idx + 1,
-                            chunk: chunkLabel
-                        });
+                    // 各断片にパス付き見出しを付けて帰属を保持する。
+                    // バイト・文字の両予算で分割し、断片は複数パートへ分散する。
+                    const rawPieces = _splitContentDualWords(content, chunkByteBudget, SINGLE_BLOCK_WORD_BUDGET, encoder);
+                    // chunkLabel は最終的な総断片数で付け直すため、ここでは仮採番しない
+                    rawPieces.forEach((piece) => {
+                        tmpBlocks.push({ item, piece, contentLen: content.length, idx });
                     });
                 }
 
-                // 空パート（全件スキップ時）は出力しない
-                if (!lines.length) continue;
-                partFileList.push(partFiles);
+                // 総断片数を確定して chunkLabel を付与し、OKFブロック化する
+                // 同一ファイルの断片がグループを跨いで分離しても label が壊れないよう
+                // グループ内で同一パスの出現回数を数える
+                const pathCounts = new Map();
+                for (const b of tmpBlocks) pathCounts.set(b.item.relativePath, (pathCounts.get(b.item.relativePath) || 0) + 1);
+                const pathSeen = new Map();
+                const builtBlocks = [];
+                const builtFiles = [];
+                for (const b of tmpBlocks) {
+                    const total = pathCounts.get(b.item.relativePath) || 1;
+                    const seen = (pathSeen.get(b.item.relativePath) || 0) + 1;
+                    pathSeen.set(b.item.relativePath, seen);
+                    const chunkLabel = total > 1 ? `split ${seen}/${total}` : null;
+                    builtBlocks.push(this._buildOKFFileBlock(b.item, b.piece, { chunkLabel }));
+                    builtFiles.push({
+                        path: b.item.relativePath,
+                        project: b.item.projectName || '',
+                        filter: b.item.filter || '',
+                        size: b.contentLen,
+                        globalIndex: b.idx + 1,
+                        chunk: chunkLabel
+                    });
+                }
 
-                const body = lines.join('');
+                // 単語数・バイト数・件数でサブパートへ梱包（cur はグループ跨ぎで継続し、末尾の微小パートを出さない）
+                for (let bi = 0; bi < builtBlocks.length; bi++) {
+                    const bl = builtBlocks[bi];
+                    const blWords = countWords(bl);
+                    const blBytes = encoder.encode(bl).length;
+                    const gidx = builtFiles[bi].globalIndex;
+                    const newFileCount = curFileCount + ((cur.blocks.length > 0 && gidx === curLastGlobal) ? 0 : 1);
+                    if (cur.blocks.length > 0 &&
+                        (cur.bodyWords + blWords > bodyWordBudget ||
+                         cur.bodyBytes + blBytes > bodyByteBudget ||
+                         (hasCountLimit && newFileCount > effectiveMaxFiles))) {
+                        flushCur();
+                    }
+                    // 単一ブロックが予算超えの場合はさらに内容を細分化するのではなく
+                    // そのまま単独パート化し、Phase 3 の実測検証で強制分割する
+                    cur.blocks.push(bl);
+                    cur.files.push(builtFiles[bi]);
+                    cur.bodyWords += blWords;
+                    cur.bodyBytes += blBytes;
+                    if (gidx !== curLastGlobal) { curFileCount++; curLastGlobal = gidx; }
+                    // 単独で予算超えのブロックは即フラッシュして次へ
+                    if (blWords > bodyWordBudget || blBytes > bodyByteBudget) flushCur();
+                }
+                // グループ末ではフラッシュしない（次のグループへ継続）。一時配列のみ破棄する。
+                tmpBlocks.length = 0;
+            }
+            flushCur();
+
+            if (onProgress) onProgress(targets.length, targets.length);
+
+            // 空（全件スキップ時）は出力しない
+            subParts = subParts.filter(sp => sp.blocks.length > 0);
+            if (!subParts.length) return { results: [], partFileList: [] };
+
+            // Phase 3: 実測検証ループ（全出力が50万語未満になるまで超過パートを半分に分割）
+            const buildFullText = (sp, partNum, totalParts, partGroups) => {
+                const body = sp.blocks.join('');
                 const frontmatter = this._buildOKFFrontmatter({
                     rootName,
                     partNum,
                     totalParts,
-                    fileCount: partFiles.length,
+                    fileCount: sp.files.length,
                     totalSizeBytes: encoder.encode(body).length,
                     mode,
                     entryPoints
@@ -379,18 +574,131 @@
                     mode,
                     projects,
                     totalFiles: targets.length,
-                    currentPartFiles: partFiles,
-                    partGroups: groups.map(g => g.map(i => targets[i].relativePath))
+                    currentPartFiles: sp.files,
+                    partGroups
                 });
-                const fullText = frontmatter + header + body;
-                // 即Blob化して文字列を破棄（ピークメモリ抑制）
+                return frontmatter + header + body;
+            };
+            const isOver = (text) => countWords(text) >= MAX_OUTPUT_WORDS;
+            // 末尾パートが極端に小さい場合は直前パートと均す（結合or単語数均等2分割）
+            const distinctFileCount = (files) => new Set(files.map(f => f.globalIndex)).size;
+            const blockWords = (blocks) => blocks.map(b => countWords(b));
+            const splitBalanced = (blocks, files) => {
+                const ws = blockWords(blocks);
+                const total = ws.reduce((s, x) => s + x, 0);
+                let acc = 0;
+                let mid = Math.ceil(blocks.length / 2);
+                for (let i = 0; i < blocks.length; i++) {
+                    acc += ws[i];
+                    if (acc >= total / 2) { mid = i + 1; break; }
+                }
+                mid = Math.max(1, Math.min(blocks.length - 1, mid));
+                const mk = (b, f) => ({
+                    blocks: b,
+                    files: f,
+                    bodyWords: b.reduce((s, x) => s + countWords(x), 0),
+                    bodyBytes: b.reduce((s, x) => s + encoder.encode(x).length, 0)
+                });
+                return [mk(blocks.slice(0, mid), files.slice(0, mid)),
+                        mk(blocks.slice(mid), files.slice(mid))];
+            };
+            const fixTinyTail = () => {
+                if (subParts.length < 2) return false;
+                const last = subParts[subParts.length - 1];
+                if (last.bodyWords >= bodyWordBudget * 0.5) return false;
+                const prev = subParts[subParts.length - 2];
+                const mBlocks = prev.blocks.concat(last.blocks);
+                const mFiles = prev.files.concat(last.files);
+                if (mBlocks.length <= 1) return false;
+                // 件数制限を壊す結合・再分割は行わない
+                if (hasCountLimit && distinctFileCount(mFiles) > effectiveMaxFiles) {
+                    const [h1, h2] = splitBalanced(mBlocks, mFiles);
+                    if (distinctFileCount(h1.files) > effectiveMaxFiles ||
+                        distinctFileCount(h2.files) > effectiveMaxFiles) return false;
+                    if (h1.blocks.length === prev.blocks.length) return false; // 進展なし
+                    subParts.splice(subParts.length - 2, 2, h1, h2);
+                    return true;
+                }
+                // 結合で収まるなら1パートにまとめる（実測で確認）
+                const trial = subParts.slice(0, -2).concat([{
+                    blocks: mBlocks, files: mFiles,
+                    bodyWords: mBlocks.reduce((s, x) => s + countWords(x), 0),
+                    bodyBytes: mBlocks.reduce((s, x) => s + encoder.encode(x).length, 0)
+                }]);
+                const tGroups = trial.map(sp => [...new Set(sp.files.map(f => f.path))]);
+                const mergedText = buildFullText(trial[trial.length - 1], trial.length, trial.length, tGroups);
+                if (!isOver(mergedText) &&
+                    (bodyByteBudget === Infinity || encoder.encode(mergedText).length <= effectivePartSize)) {
+                    subParts = trial;
+                    return true;
+                }
+                const [h1, h2] = splitBalanced(mBlocks, mFiles);
+                if (h1.blocks.length === prev.blocks.length) return false; // 進展なし
+                subParts.splice(subParts.length - 2, 2, h1, h2);
+                return true;
+            };
+
+            let guard = 0;
+            let tailFixed = false;
+            while (guard++ < 10000) {
+                const totalParts = subParts.length;
+                const partGroups = subParts.map(sp => [...new Set(sp.files.map(f => f.path))]);
+                let victim = -1;
+                const texts = [];
+                for (let i = 0; i < subParts.length; i++) {
+                    const t = buildFullText(subParts[i], i + 1, totalParts, partGroups);
+                    texts.push(t);
+                    if (victim === -1 && isOver(t)) victim = i;
+                }
+                if (victim === -1) {
+                    if (!tailFixed) { tailFixed = true; if (fixTinyTail()) continue; }
+                    break;
+                }
+                const sp = subParts[victim];
+                if (sp.blocks.length <= 1) {
+                    // 単一ブロックで超過: ブロック内容自体を半分に割って2ブロック化する
+                    // （OKF構造は崩れるが単語数保証を優先する最終手段。通常は到達しない）
+                    const b = sp.blocks[0];
+                    const mid = Math.floor(b.length / 2);
+                    const f = sp.files[0];
+                    const total = 2;
+                    const b1 = this._buildOKFFileBlock(
+                        { relativePath: f.path, projectName: f.project, filter: f.filter, size: f.size },
+                        b.slice(0, mid), { chunkLabel: `split 1/${total}` });
+                    const b2 = this._buildOKFFileBlock(
+                        { relativePath: f.path, projectName: f.project, filter: f.filter, size: f.size },
+                        b.slice(mid), { chunkLabel: `split 2/${total}` });
+                    subParts.splice(victim, 1,
+                        { blocks: [b1], files: [{ ...f, chunk: `split 1/${total}` }], bodyWords: countWords(b1), bodyBytes: encoder.encode(b1).length },
+                        { blocks: [b2], files: [{ ...f, chunk: `split 2/${total}` }], bodyWords: countWords(b2), bodyBytes: encoder.encode(b2).length });
+                } else {
+                    const mid = Math.ceil(sp.blocks.length / 2);
+                    const mk = (blocks, files) => ({
+                        blocks,
+                        files,
+                        bodyWords: blocks.reduce((s, x) => s + countWords(x), 0),
+                        bodyBytes: blocks.reduce((s, x) => s + encoder.encode(x).length, 0)
+                    });
+                    subParts.splice(victim, 1,
+                        mk(sp.blocks.slice(0, mid), sp.files.slice(0, mid)),
+                        mk(sp.blocks.slice(mid), sp.files.slice(mid)));
+                }
+            }
+
+            // 最終 Blob 化（この時点で totalParts 確定）
+            const totalParts = subParts.length;
+            const partGroups = subParts.map(sp => [...new Set(sp.files.map(f => f.path))]);
+            const results = [];
+            const partFileList = [];
+            for (let i = 0; i < subParts.length; i++) {
+                const fullText = buildFullText(subParts[i], i + 1, totalParts, partGroups);
+                partFileList.push(subParts[i].files);
                 results.push({
-                    filename: `${rootName}_src_${String(partNum).padStart(3, '0')}_of_${String(totalParts).padStart(3, '0')}${cleanExt}`,
+                    filename: `${rootName}_src_${String(i + 1).padStart(3, '0')}_of_${String(totalParts).padStart(3, '0')}${cleanExt}`,
                     blob: bomTextBlob(fullText, 'text/markdown;charset=utf-8')
                 });
             }
 
-            if (onProgress) onProgress(targets.length, targets.length);
             return { results, partFileList };
         },
 
@@ -815,17 +1123,14 @@
             maxIndexBytes: maxPartSizeBytes
         });
 
-        // Generate CSV files based on mode
-        const targetFilesCsvBlob = _generateTargetFilesCsv(fileItems);
-        let secondaryCsvBlob = null;
-        let secondaryCsvName = '';
+        // Generate CSV files based on mode (all sharded to < 500k words)
+        const targetFilesCsvs = _shardTargetFilesCsv(fileItems, 'target_files_list.csv');
+        let secondaryCsvs = null;
 
         if (mode === 'vcxproj') {
-            secondaryCsvBlob = _generateVcxprojCsv(targetProjects);
-            secondaryCsvName = 'vcxproj_list.csv';
+            secondaryCsvs = _shardVcxprojCsv(targetProjects, 'vcxproj_list.csv');
         } else {
-            secondaryCsvBlob = _generateFolderStructureCsv(fileItems);
-            secondaryCsvName = 'folder_structure.csv';
+            secondaryCsvs = _shardFolderStructureCsv(fileItems, 'folder_structure.csv');
         }
 
         Status.show(`Creating ZIP package with ${results.length} part(s), ${indexFiles.length} index file(s), and metadata CSVs...`, true);
@@ -838,12 +1143,16 @@
             for (const r of results) {
                 zip.file(r.filename, r.blob);
             }
-            zip.file(secondaryCsvName, secondaryCsvBlob);
-            zip.file('target_files_list.csv', targetFilesCsvBlob);
+            for (const c of secondaryCsvs) {
+                zip.file(c.filename, c.blob);
+            }
+            for (const c of targetFilesCsvs) {
+                zip.file(c.filename, c.blob);
+            }
 
             const zipBlob = await zip.generateAsync({ type: 'blob' });
             downloadBlob(zipBlob, `${rootName}_llm_export.zip`);
-            Status.show(`Exported ZIP: ${indexFiles.length} index file(s) + ${results.length} part(s) + 2 CSVs (${formatBytes(zipBlob.size)})`);
+            Status.show(`Exported ZIP: ${indexFiles.length} index file(s) + ${results.length} part(s) + ${secondaryCsvs.length + targetFilesCsvs.length} CSVs (${formatBytes(zipBlob.size)})`);
         } catch (e) {
             console.warn('ZIP creation failed, downloading files individually:', e);
             for (const idx of indexFiles) {
@@ -854,21 +1163,100 @@
                 downloadBlob(r.blob, r.filename);
                 await new Promise(res => setTimeout(res, 300));
             }
-            downloadBlob(secondaryCsvBlob, secondaryCsvName);
-            await new Promise(res => setTimeout(res, 300));
-            downloadBlob(targetFilesCsvBlob, 'target_files_list.csv');
-            Status.show(`Exported ${results.length + indexFiles.length + 2} files individually`);
+            for (const c of secondaryCsvs) {
+                downloadBlob(c.blob, c.filename);
+                await new Promise(res => setTimeout(res, 300));
+            }
+            for (const c of targetFilesCsvs) {
+                downloadBlob(c.blob, c.filename);
+                await new Promise(res => setTimeout(res, 300));
+            }
+            Status.show(`Exported ${results.length + indexFiles.length + secondaryCsvs.length + targetFilesCsvs.length} files individually`);
         }
     }
 
     // =====================================================================
-    //  CSV Generators
+    //  CSV Generators (all outputs guaranteed < 500k words via sharding)
     // =====================================================================
 
-    function _generateVcxprojCsv(projects) {
+    /**
+     * CSV行群を単語数ターゲットでシャード分割する（ヘッダは各シャードに複製）。
+     * 単一時は [{filename: baseName, blob}]、複数時は `${stem}_001_of_N.csv` …。
+     * @returns {Array<{filename: string, blob: Blob}>}
+     */
+    function _shardCsvRows(headerLine, rowLines, baseName) {
+        const target = OUTPUT_WORD_TARGET;
+        const headerWords = countWords(headerLine) + 1;
+        const shards = [];
+        let cur = [];
+        let curWords = headerWords;
+        for (const row of rowLines) {
+            const rw = countWords(row) + 1;
+            if (cur.length > 0 && curWords + rw > target) {
+                shards.push(cur);
+                cur = [];
+                curWords = headerWords;
+            }
+            cur.push(row);
+            curWords += rw;
+        }
+        if (cur.length || shards.length === 0) shards.push(cur);
+
+        // 末尾シャードが極端に小さい場合は直前と均す（結合or均等2分割）
+        if (shards.length >= 2) {
+            const wordsOf = (rows) => rows.reduce((s, r) => s + countWords(r) + 1, 0);
+            const lastWords = wordsOf(shards[shards.length - 1]);
+            if (lastWords < target * 0.5) {
+                const prev = shards[shards.length - 2];
+                const combined = prev.concat(shards[shards.length - 1]);
+                const mergedText = headerLine + '\n' + combined.join('\n') + '\n';
+                if (countWords(mergedText) < MAX_OUTPUT_WORDS) {
+                    shards.splice(shards.length - 2, 2, combined);
+                } else if (combined.length > 2) {
+                    // 単語数で均等に2分割する
+                    const total = wordsOf(combined);
+                    let acc = 0, mid = Math.ceil(combined.length / 2);
+                    for (let i = 0; i < combined.length; i++) {
+                        acc += countWords(combined[i]) + 1;
+                        if (acc >= total / 2) { mid = i + 1; break; }
+                    }
+                    mid = Math.max(1, Math.min(combined.length - 1, mid));
+                    shards.splice(shards.length - 2, 2, combined.slice(0, mid), combined.slice(mid));
+                }
+            }
+        }
+
+        // 実測検証。超過シャードは半分に再分割する。
+        let guard = 0;
+        while (guard++ < 1000) {
+            let victim = -1;
+            const texts = shards.map(rows => headerLine + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n'));
+            for (let i = 0; i < texts.length; i++) {
+                if (countWords(texts[i]) >= MAX_OUTPUT_WORDS && shards[i].length > 1) { victim = i; break; }
+            }
+            if (victim === -1) break;
+            const rows = shards[victim];
+            const mid = Math.ceil(rows.length / 2);
+            shards.splice(victim, 1, rows.slice(0, mid), rows.slice(mid));
+        }
+
+        const dot = baseName.lastIndexOf('.');
+        const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+        const ext = dot > 0 ? baseName.slice(dot) : '.csv';
+        return shards.map((rows, si) => {
+            const text = headerLine + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
+            if (shards.length === 1) {
+                return { filename: baseName, blob: bomTextBlob(text, 'text/csv;charset=utf-8;') };
+            }
+            const num = String(si + 1).padStart(3, '0');
+            const total = String(shards.length).padStart(3, '0');
+            return { filename: `${stem}_${num}_of_${total}${ext}`, blob: bomTextBlob(text, 'text/csv;charset=utf-8;') };
+        });
+    }
+
+    function _buildVcxprojCsvRows(projects) {
         const headers = ['Project Name', 'Project Path', 'Configurations', 'Sources', 'Headers', 'Resources', 'Preprocessor Defines', 'Include Directories'];
         const escape = csvEscape;
-
         const rows = projects.map(p => [
             escape(p.name),
             escape(p.path),
@@ -878,16 +1266,13 @@
             p.resourceFiles.length,
             escape(p.defines.join('; ')),
             escape(p.includeDirs.join('; '))
-        ]);
-
-        const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
-        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
+        ].join(','));
+        return { header: headers.join(','), rows };
     }
 
-    function _generateFolderStructureCsv(fileItems) {
+    function _buildFolderStructureCsvRows(fileItems) {
         const headers = ['Folder Path', 'Parent Folder', 'Depth', 'File Count', 'Total Size (Bytes)'];
         const escape = csvEscape;
-
         const folderMap = new Map();
         for (const item of fileItems) {
             const folderPath = dirnameOf(item.relativePath);
@@ -906,32 +1291,59 @@
             info.fileCount++;
             info.totalSize += (item.size || 0);
         }
-
         const rows = [...folderMap.values()].map(f => [
             escape(f.folderPath),
             escape(f.parentFolder),
             f.depth,
             f.fileCount,
             f.totalSize
-        ]);
-
-        const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
-        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
+        ].join(','));
+        return { header: headers.join(','), rows };
     }
 
-    function _generateTargetFilesCsv(fileItems) {
+    function _buildTargetFilesCsvRows(fileItems) {
         const headers = ['File Path', 'Project Name', 'Filter Path', 'Size (Bytes)', 'Extension'];
         const escape = csvEscape;
-
         const rows = fileItems.map(item => [
             escape(item.relativePath),
             escape(item.projectName || ''),
             escape(item.filter || ''),
             item.size || 0,
             escape(_getExtension(item.relativePath))
-        ]);
+        ].join(','));
+        return { header: headers.join(','), rows };
+    }
 
-        const csvText = [headers.join(','), ...rows.map(r => r.join(','))].join('\n') + '\n';
+    function _shardVcxprojCsv(projects, baseName = 'vcxproj_list.csv') {
+        const { header, rows } = _buildVcxprojCsvRows(projects);
+        return _shardCsvRows(header, rows, baseName);
+    }
+
+    function _shardFolderStructureCsv(fileItems, baseName = 'folder_structure.csv') {
+        const { header, rows } = _buildFolderStructureCsvRows(fileItems);
+        return _shardCsvRows(header, rows, baseName);
+    }
+
+    function _shardTargetFilesCsv(fileItems, baseName = 'target_files_list.csv') {
+        const { header, rows } = _buildTargetFilesCsvRows(fileItems);
+        return _shardCsvRows(header, rows, baseName);
+    }
+
+    function _generateVcxprojCsv(projects) {
+        const { header, rows } = _buildVcxprojCsvRows(projects);
+        const csvText = header + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
+        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
+    }
+
+    function _generateFolderStructureCsv(fileItems) {
+        const { header, rows } = _buildFolderStructureCsvRows(fileItems);
+        const csvText = header + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
+        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
+    }
+
+    function _generateTargetFilesCsv(fileItems) {
+        const { header, rows } = _buildTargetFilesCsvRows(fileItems);
+        const csvText = header + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
         return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
     }
 
@@ -946,7 +1358,8 @@
      */
     function _generateIndexMd({ rootName, mode, ext, allFilesInfo, fileItems, results, partFileList, projects, maxIndexBytes }) {
         const encoder = new TextEncoder();
-        const limit = (maxIndexBytes && maxIndexBytes > 0) ? maxIndexBytes : Infinity;
+        const byteLimit = (maxIndexBytes && maxIndexBytes > 0) ? maxIndexBytes : Infinity;
+        const wordLimit = OUTPUT_WORD_TARGET;
         const totalFiles = allFilesInfo.length;
         const exportedFiles = allFilesInfo.filter(f => f.isExportTarget).length;
         const binaryFiles = totalFiles - exportedFiles;
@@ -1099,27 +1512,121 @@
             allRows.push(`| ${i + 1} | \`${f.relativePath}\` | ${formatBytes(f.size)} | ${type} | ${partStr} |`);
         }
 
-        const headText = lines.join('\n') + '\n';
-        const headBytes = encoder.encode(headText).length;
+        let headText = lines.join('\n') + '\n';
         const tableHead = ['## All Files', '', '| # | Path | Size | Type | Part |', '|---|---|---|---|---|'];
         const tableHeadText = tableHead.join('\n') + '\n';
+
+        // ヘッダ単体で単語数ターゲット超えの場合は Directory Structure 行を間引いて保証する
+        const headFits = (h) => countWords(h) + countWords(tableHeadText) < wordLimit &&
+            (byteLimit === Infinity || encoder.encode(h).length + encoder.encode(tableHeadText).length < byteLimit);
+        if (!headFits(headText)) {
+            const dirHeaderIdx = lines.findIndex(l => l === '| Directory | Files | Exported | Non-Exported | Size |');
+            if (dirHeaderIdx !== -1) {
+                // ディレクトリ行範囲を特定（ヘッダ2行後〜空行まで）
+                let start = dirHeaderIdx + 2;
+                let end = start;
+                while (end < lines.length && lines[end] !== '') end++;
+                const total = end - start;
+                // 先頭から収まる分だけ残す
+                let keep = total;
+                while (keep > 0 && !headFits(lines.slice(0, start).join('\n') + '\n' +
+                    lines.slice(start, start + keep).join('\n') +
+                    `\n... (${total - keep} directories omitted to stay under 500k words)\n` +
+                    lines.slice(end).join('\n') + '\n')) {
+                    keep = Math.floor(keep / 2);
+                }
+                const omitted = total - keep;
+                const kept = lines.slice(start, start + keep);
+                if (omitted > 0) kept.push(`... (${omitted} directories omitted to stay under 500k words)`);
+                lines.splice(start, total, ...kept);
+                headText = lines.join('\n') + '\n';
+            }
+        }
+        const headBytes = encoder.encode(headText).length;
         const tableHeadBytes = encoder.encode(tableHeadText).length;
 
-        // 行単位でシャード割付
+        // 行単位でシャード割付（バイト制限と単語数制限の厳しい方）
+        const headWords = countWords(headText);
+        const tableHeadWords = countWords(tableHeadText);
         const shards = [];
         let cur = [];
         let curBytes = headBytes + tableHeadBytes;
+        let curWords = headWords + tableHeadWords;
+        const nextShardHeadBytes = tableHeadBytes + 1200;
+        const nextShardHeadWords = tableHeadWords + INDEX_SHARD_HEAD_EST_WORDS;
         for (const row of allRows) {
             const rb = encoder.encode(row + '\n').length;
-            if (cur.length > 0 && curBytes + rb > limit) {
+            const rw = countWords(row) + 1;
+            if (cur.length > 0 && (curBytes + rb > byteLimit || curWords + rw > wordLimit)) {
                 shards.push(cur);
                 cur = [];
-                curBytes = tableHeadBytes;
+                curBytes = nextShardHeadBytes;
+                curWords = nextShardHeadWords;
             }
             cur.push(row);
             curBytes += rb;
+            curWords += rw;
         }
         if (cur.length || shards.length === 0) shards.push(cur);
+
+        // 末尾シャードが極端に小さい場合は直前と均す（結合or均等2分割）
+        if (shards.length >= 2) {
+            const rowsWordsOf = (rows) => rows.reduce((s, r) => s + countWords(r) + 1, 0);
+            if (rowsWordsOf(shards[shards.length - 1]) < wordLimit * 0.5) {
+                const combined = shards[shards.length - 2].concat(shards[shards.length - 1]);
+                const trialLen = shards.length - 1;
+                let masterTrial = headText;
+                if (trialLen > 1) {
+                    masterTrial = headText.replace('| Export Parts |',
+                        `| Index Shard Files | ${trialLen} file(s) (\`index.md\` + \`index_files_*\`) |\n| Export Parts |`);
+                }
+                const mergedText = trialLen === 1
+                    ? masterTrial + tableHeadText + combined.join('\n') + '\n'
+                    : _buildIndexShardHead(rootName, trialLen, trialLen) + tableHeadText + combined.join('\n') + '\n';
+                if (countWords(mergedText) < MAX_OUTPUT_WORDS &&
+                    (byteLimit === Infinity || encoder.encode(mergedText).length <= byteLimit)) {
+                    shards.splice(shards.length - 2, 2, combined);
+                } else if (combined.length > 2) {
+                    const total = rowsWordsOf(combined);
+                    let acc = 0, mid = Math.ceil(combined.length / 2);
+                    for (let i = 0; i < combined.length; i++) {
+                        acc += countWords(combined[i]) + 1;
+                        if (acc >= total / 2) { mid = i + 1; break; }
+                    }
+                    mid = Math.max(1, Math.min(combined.length - 1, mid));
+                    shards.splice(shards.length - 2, 2, combined.slice(0, mid), combined.slice(mid));
+                }
+            }
+        }
+
+        // 実測検証：各シャードの最終テキストが50万語未満になるまで半分に再分割する
+        const buildShardTextForCheck = (rows, si, totalShards, masterHead) => {
+            if (totalShards === 1) return masterHead + tableHeadText + rows.join('\n') + '\n';
+            if (si === 0) return masterHead + tableHeadText + rows.join('\n') + '\n';
+            const shardNum = si + 1;
+            const shardHead = _buildIndexShardHead(rootName, shardNum, totalShards);
+            return shardHead + tableHeadText + rows.join('\n') + '\n';
+        };
+        let guard = 0;
+        while (guard++ < 1000) {
+            let masterHeadTmp = headText;
+            if (shards.length > 1) {
+                masterHeadTmp = headText.replace('| Export Parts |',
+                    `| Index Shard Files | ${shards.length} file(s) (\`index.md\` + \`index_files_*\`) |\n| Export Parts |`);
+            }
+            let victim = -1;
+            for (let i = 0; i < shards.length; i++) {
+                const t = buildShardTextForCheck(shards[i], i, shards.length, masterHeadTmp);
+                if (countWords(t) >= MAX_OUTPUT_WORDS ||
+                    (byteLimit !== Infinity && encoder.encode(t).length > byteLimit && shards[i].length > 1)) {
+                    if (shards[i].length > 1) { victim = i; break; }
+                }
+            }
+            if (victim === -1) break;
+            const rows = shards[victim];
+            const mid = Math.ceil(rows.length / 2);
+            shards.splice(victim, 1, rows.slice(0, mid), rows.slice(mid));
+        }
 
         let masterHeadText = headText;
         if (shards.length > 1) {
@@ -1135,22 +1642,7 @@
             if (si === 0) {
                 return { filename: 'index.md', blob: bomTextBlob(masterHeadText + tableHeadText + rows.join('\n') + '\n', 'text/markdown;charset=utf-8') };
             }
-            const shardHead = [
-                '---',
-                'type: codebase_index_shard',
-                'format_version: "1.0-okf"',
-                `title: "${rootName} — Codebase Index (Files ${shardNum}/${shards.length})"`,
-                `index_of: "index.md"`,
-                `shard_number: ${shardNum}`,
-                `total_shards: ${shards.length}`,
-                `generated_at: "${new Date().toISOString()}"`,
-                '---',
-                '',
-                `# ${rootName} — Codebase Index (Files Shard ${shardNum}/${shards.length})`,
-                '',
-                '> Continuation of the All Files table. Load `index.md` first for structural context.',
-                '',
-            ].join('\n') + '\n';
+            const shardHead = _buildIndexShardHead(rootName, shardNum, shards.length);
             const num = String(shardNum).padStart(3, '0');
             const totalNum = String(shards.length).padStart(3, '0');
             return { filename: `index_files_${num}_of_${totalNum}.md`, blob: bomTextBlob(shardHead + tableHeadText + rows.join('\n') + '\n', 'text/markdown;charset=utf-8') };
@@ -1256,11 +1748,16 @@
         VcxprojParser,
         SourceConsolidator,
         DEFAULT_CONFIG,
+        MAX_OUTPUT_WORDS,
+        OUTPUT_WORD_TARGET,
         // テスト用の内部公開（仕様外）
         _internals: { getExtension: _getExtension, detectLanguage: _detectLanguage, fuzzyMatchProject: _fuzzyMatchProject, detectEntryPoints: _detectEntryPoints,
             generateTargetFilesCsv: _generateTargetFilesCsv, generateFolderStructureCsv: _generateFolderStructureCsv, generateVcxprojCsv: _generateVcxprojCsv,
             generateIndexMd: _generateIndexMd, assignParts, buildSubtree: _buildSubtree,
-            splitContent: _splitContent, createExcludeMatcher, sortFileItems, getDefaultExcludesString }
+            splitContent: _splitContent, countWords, splitContentByWords: _splitContentByWords, splitContentDualWords: _splitContentDualWords,
+            shardCsvRows: _shardCsvRows, shardTargetFilesCsv: _shardTargetFilesCsv,
+            shardFolderStructureCsv: _shardFolderStructureCsv, shardVcxprojCsv: _shardVcxprojCsv,
+            createExcludeMatcher, sortFileItems, getDefaultExcludesString }
     };
     // 旧名前空間の後方互換エイリアス（移行期間のみ）
     FileFlow.notebookLM = FileFlow.llmExport;

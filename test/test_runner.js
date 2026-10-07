@@ -643,6 +643,143 @@
         FileFlow.state.appSettings = {};
     });
 
+    test("llmExport — countWords counts tokens plus CJK", () => {
+        const t = FileFlow.llmExport._internals;
+        assert.equal(t.countWords(''), 0);
+        assert.equal(t.countWords('hello world'), 2);
+        assert.equal(t.countWords('a  b\nc'), 3);
+        // 日本語は空白区切り1トークン + CJK文字数で保守的に加算
+        assert.ok(t.countWords('あいうえお') >= 5, 'CJK chars counted');
+        assert.ok(t.countWords('hello 世界') >= 3, 'mixed content counted');
+    });
+
+    test("llmExport — splitContentByWords chunks losslessly", () => {
+        const t = FileFlow.llmExport._internals;
+        assert.deepEqual(t.splitContentByWords('a\nb\n', Infinity), ['a\nb\n']);
+        const src = Array.from({ length: 200 }, () => 'word1 word2').join('\n') + '\n';
+        const chunks = t.splitContentByWords(src, 100);
+        assert.ok(chunks.length >= 2);
+        assert.equal(chunks.join(''), src);
+        assert.ok(chunks.every(c => t.countWords(c) <= 100));
+        // 長大1行は単語ラン単位で切断される
+        const longSrc = ('w '.repeat(3000)).trim();
+        const long = t.splitContentByWords(longSrc, 1024);
+        assert.ok(long.length > 1);
+        assert.equal(long.join(''), longSrc);
+        assert.ok(long.every(c => t.countWords(c) <= 1024));
+        // 空白なしCJK長大行は文字単位で切断される
+        const cjk = 'あ'.repeat(3000);
+        const cchunks = t.splitContentByWords(cjk, 1024);
+        assert.ok(cchunks.length > 1);
+        assert.equal(cchunks.join(''), cjk);
+    });
+
+    test("llmExport — every src part is under 500k words even with huge byte limit", async () => {
+        const t = FileFlow.llmExport._internals;
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const body = 'lorem ipsum dolor sit amet consectetur adipiscing\n'.repeat(5000); // 約4万語
+        const mk = (rel) => ({
+            entry: { name: rel.split('/').pop(), fullPath: '/root/' + rel, file: (ok) => ok(new Blob([body])) },
+            relativePath: rel, projectName: '', filter: '', size: body.length
+        });
+        const items = [];
+        for (let i = 0; i < 20; i++) items.push(mk(`src/f${i}.cpp`));
+        const { results } = await SourceConsolidator.consolidate({
+            fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 100 * 1024 * 1024, maxFilesPerPart: 0, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.ok(results.length > 1);
+        for (const r of results) {
+            const text = await r.blob.text();
+            assert.ok(t.countWords(text) < 500000, `part ${r.filename} has ${t.countWords(text)} words`);
+        }
+    });
+
+    test("llmExport — single huge file spills across parts under 500k words", async () => {
+        const t = FileFlow.llmExport._internals;
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const big = 'word '.repeat(600000);
+        const items = [{
+            entry: { name: 'big.cpp', fullPath: '/root/big.cpp', file: (ok) => ok(new Blob([big])) },
+            relativePath: 'big.cpp', projectName: '', filter: '', size: big.length
+        }];
+        const { results } = await SourceConsolidator.consolidate({
+            fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 0, maxFilesPerPart: 0, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.ok(results.length > 1);
+        for (const r of results) {
+            const text = await r.blob.text();
+            assert.ok(t.countWords(text) < 500000, `part ${r.filename} has ${t.countWords(text)} words`);
+        }
+    });
+
+    test("llmExport — parts are balanced without tiny tails", async () => {
+        const t = FileFlow.llmExport._internals;
+        const { SourceConsolidator } = FileFlow.llmExport;
+        FileFlow.state.currentRootEntries = [];
+        const body = 'alpha beta gamma delta epsilon zeta\n'.repeat(3000); // 約1.8万語
+        const mk = (i) => ({
+            entry: { name: `f${i}.cpp`, fullPath: '/root/src/f' + i + '.cpp', file: (ok) => ok(new Blob([body])) },
+            relativePath: `src/f${i}.cpp`, projectName: '', filter: '', size: body.length
+        });
+        const items = [];
+        for (let i = 0; i < 30; i++) items.push(mk(i));
+        const { results } = await SourceConsolidator.consolidate({
+            fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
+            maxPartSize: 4 * 1024 * 1024, maxFilesPerPart: 1000, maxSingleFileSize: 0, onProgress: null
+        });
+        assert.ok(results.length <= 3, `too many parts: ${results.length}`);
+        for (const r of results) {
+            const text = await r.blob.text();
+            const w = t.countWords(text);
+            assert.ok(w < 500000, `over limit: ${r.filename} ${w}`);
+            assert.ok(w > 100000, `tiny tail part: ${r.filename} ${w}`);
+        }
+    });
+    test("llmExport — CSV shards stay under 500k words with headers", async () => {
+        const t = FileFlow.llmExport._internals;
+        const header = 'col one col two col three';
+        const rows = [];
+        for (let i = 0; i < 12000; i++) {
+            rows.push(Array.from({ length: 50 }, (_, k) => `w${i}_${k}`).join(' '));
+        }
+        const shards = t.shardCsvRows(header, rows, 'target_files_list.csv');
+        assert.ok(shards.length > 1);
+        assert.equal(shards[0].filename, 'target_files_list_001_of_' + String(shards.length).padStart(3, '0') + '.csv');
+        let totalRows = 0;
+        for (const s of shards) {
+            const text = await s.blob.text();
+            assert.ok(t.countWords(text) < 500000, `${s.filename} has ${t.countWords(text)} words`);
+            assert.ok(text.startsWith(header));
+            totalRows += text.trim().split('\n').length - 1;
+        }
+        assert.equal(totalRows, rows.length);
+    });
+
+    test("llmExport — index shards stay under 500k words with unlimited bytes", async () => {
+        const t = FileFlow.llmExport._internals;
+        FileFlow.state.currentRootEntries = [];
+        const info = [];
+        for (let i = 0; i < 60000; i++) {
+            info.push({ relativePath: `src/some directory name/f${i}.cpp`, size: 100, extension: '.cpp', isExportTarget: true });
+        }
+        const files = t.generateIndexMd({
+            rootName: 'root', mode: 'folder_structure', ext: '.md',
+            allFilesInfo: info, fileItems: info.map(f => ({ ...f, projectName: '', filter: '' })),
+            results: [{ filename: 'a' }, { filename: 'b' }],
+            partFileList: [[{ path: 'src/a.cpp', project: '', filter: '', size: 1 }], [{ path: 'src/b.cpp', project: '', filter: '', size: 1 }]],
+            projects: [], maxIndexBytes: 0
+        });
+        assert.ok(files.length > 1);
+        for (const f of files) {
+            const text = await f.blob.text();
+            assert.ok(t.countWords(text) < 500000, `${f.filename} has ${t.countWords(text)} words`);
+        }
+    });
+
     // --- Execution Runner ---
     async function run(onStart, onTestResult, onComplete) {
         if (onStart) onStart(tests.length);
