@@ -96,13 +96,16 @@
     }
 
     var FS = {
-        readDir: function (entry) {
+        readDir: function (entry, opts) {
+            opts = opts || {};
+            var reportError = function (error) { if (opts.onError) opts.onError(entry, error); };
             if (!entry || !entry.isDirectory) return Promise.resolve([]);
             var reader;
             try {
                 reader = entry.createReader();
             } catch (e) {
                 console.warn('readDir: createReader failed', e);
+                reportError(e);
                 return Promise.resolve([]);
             }
             return new Promise(function (resolve) {
@@ -115,10 +118,12 @@
                             pump();
                         }, function (err) {
                             console.warn('readDir failed, returning partial results', err);
+                            reportError(err);
                             resolve(all);
                         });
                     } catch (e) {
                         console.warn('readDir exception', e);
+                        reportError(e);
                         resolve(all);
                     }
                 };
@@ -139,7 +144,7 @@
                     .then(function (ret) {
                         if (ret === false || isCancelled(opts.signal)) return visit();
                         if (entry.isDirectory) {
-                            return FS.readDir(entry).then(function (children) {
+                            return FS.readDir(entry, opts).then(function (children) {
                                 for (var i = children.length - 1; i >= 0; i--) stack.push(children[i]);
                                 return visit();
                             });
@@ -288,7 +293,7 @@
 
     function csvEscape(s) {
         var str = (s === null || s === undefined) ? '' : String(s);
-        return (/[,"\n]/.test(str)) ? '"' + str.replace(/"/g, '""') + '"' : str;
+        return (/[,"\r\n]/.test(str)) ? '"' + str.replace(/"/g, '""') + '"' : str;
     }
 
     function bomTextBlob(text, mime) {
@@ -312,32 +317,74 @@
         return stack.join('/').toLowerCase();
     }
 
-    function downloadZip() {
-        var U = FF.utils;
-        var roots = State.currentRootEntries || [];
-        if (!roots.length) return Promise.resolve();
-        var matcher = Glob.createMatcher(State.searchQuery);
-        return Entries.collectFiles(roots, {
-            matcher: matcher, excludeDots: State.appSettings.excludeDots
-        }).then(function (items) {
-            var zip = new JSZip();
-            var jobs = items.map(function (item) {
-                var meta = State.getMeta(item.entry.fullPath || item.relPath) || {};
-                var nameInZip = meta.newFilename || item.entry.name;
-                var rel = item.relPath || item.entry.name;
-                var dir = rel.indexOf('/') >= 0 ? rel.slice(0, rel.lastIndexOf('/')) : '';
-                var zipPath = dir ? dir + '/' + nameInZip : nameInZip;
-                return readEntryFile(item.entry).then(function (f) {
-                    zip.file(zipPath, f);
-                }).catch(function (e) { console.warn('zip skip:', rel, e); });
-            });
-            return Promise.all(jobs).then(function () {
-                var name = roots.length === 1 ? roots[0].name + '.zip' : 'files.zip';
-                return zip.generateAsync({ type: 'blob' }).then(function (blob) {
-                    U.downloadBlob(blob, name);
-                });
-            });
+    function outputPath(item) {
+        var meta = State.getMeta(item.entry.fullPath || item.relPath) || {};
+        var rel = normalizeRelPath(item.relPath || item.entry.name);
+        var dir = rel.indexOf('/') >= 0 ? rel.slice(0, rel.lastIndexOf('/')) : '';
+        var name = meta.newFilename || item.entry.name;
+        return dir ? dir + '/' + name : name;
+    }
+
+    async function mapLimit(items, limit, fn) {
+        var next = 0;
+        var results = new Array(items.length);
+        async function worker() {
+            while (next < items.length) {
+                var index = next++;
+                results[index] = await fn(items[index], index);
+            }
+        }
+        await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+        return results;
+    }
+
+    async function createZip(items, scanErrors) {
+        var paths = new Set();
+        items.forEach(function (item) {
+            var path = outputPath(item);
+            if (paths.has(path)) throw new Error('Duplicate ZIP path: ' + path);
+            paths.add(path);
         });
+        paths.forEach(function (path) {
+            var segments = path.split('/');
+            for (var i = 1; i < segments.length; i++) {
+                var parent = segments.slice(0, i).join('/');
+                if (paths.has(parent)) throw new Error('ZIP file/directory conflict: ' + parent);
+            }
+        });
+        var zip = new JSZip();
+        var report = await mapLimit(items, 8, async function (item) {
+            var path = outputPath(item);
+            try {
+                zip.file(path, await readEntryFile(item.entry));
+                return { path: path, status: 'exported', reason: '' };
+            } catch (e) {
+                return { path: path, status: 'failed', reason: String(e.message || e) };
+            }
+        });
+        report.push.apply(report, scanErrors || []);
+        // Keep reports outside the input namespace, including when a source has this name.
+        var reportPath = '_fileflow_export_report.csv';
+        while (paths.has(reportPath) || Array.from(paths).some(function (path) { return path.indexOf(reportPath + '/') === 0; })) reportPath = '_' + reportPath;
+        zip.file(reportPath, bomTextBlob('Path,Status,Reason\n' + report.map(function (r) {
+            return [r.path, r.status, r.reason].map(csvEscape).join(',');
+        }).join('\n') + '\n', 'text/csv;charset=utf-8;'));
+        return { blob: await zip.generateAsync({ type: 'blob' }), report: report };
+    }
+
+    async function downloadZip() {
+        var roots = State.currentRootEntries.slice();
+        if (!roots.length) return;
+        var scanErrors = [];
+        var items = await Entries.collectFiles(roots, {
+            matcher: Glob.createMatcher(State.searchQuery), excludeDots: State.appSettings.excludeDots,
+            onError: function (entry, error) { scanErrors.push({ path: entry.fullPath, status: 'failed', reason: 'directory-read: ' + String(error.message || error) }); }
+        });
+        var result = await createZip(items, scanErrors);
+        FF.utils.downloadBlob(result.blob, roots.length === 1 ? roots[0].name + '.zip' : 'files.zip');
+        var failed = result.report.filter(function (r) { return r.status === 'failed'; }).length;
+        if (FF.ui.Status) FF.ui.Status.show('ZIP exported: ' + (result.report.length - failed) + ' files, ' + failed + ' failed (see export report)');
+        return result;
     }
 
     FF.utils = Object.assign(FF.utils || {}, {
@@ -345,7 +392,9 @@
         FS: FS,
         Entries: Entries,
         Detect: { detectFileInfo: detectFileInfo },
-        Zip: { downloadZip: downloadZip },
+        Zip: { downloadZip: downloadZip, createZip: createZip },
+        outputPath: outputPath,
+        mapLimit: mapLimit,
         readEntryFile: readEntryFile,
         csvEscape: csvEscape,
         bomTextBlob: bomTextBlob,

@@ -32,6 +32,20 @@
         error(msg) { Status.show(`Error: ${msg}`); }
     };
 
+    let operationActive = false;
+    async function runOperation(task) {
+        if (operationActive) return;
+        operationActive = true;
+        const controls = [...document.querySelectorAll('header button, .toolbar button, .toolbar input, #settings-modal input, #settings-modal textarea, #vcxproj-execute-btn')];
+        const previous = controls.map(control => control.disabled);
+        controls.forEach(control => { control.disabled = true; });
+        try { return await task(); }
+        finally {
+            controls.forEach((control, index) => { control.disabled = previous[index]; });
+            operationActive = false;
+        }
+    }
+
     // =====================
     //  Modal Factory
     // =====================
@@ -87,11 +101,11 @@
                 <h4>LLM Export Settings</h4>
                 <div class="setting-item-block">
                     <label class="setting-label">Max part size (MB)</label>
-                    <input type="number" id="llm-max-part-size" class="setting-input-sm" value="4" min="1" max="50" step="1">
+                    <input type="number" id="llm-max-part-size" class="setting-input-sm" value="4" min="0.01" max="50" step="0.01">
                 </div>
                 <div class="setting-item-block">
                     <label class="setting-label">Max single file size (MB)</label>
-                    <input type="number" id="llm-max-file-size" class="setting-input-sm" value="1" min="0.1" max="10" step="0.1">
+                    <input type="number" id="llm-max-file-size" class="setting-input-sm" value="1" min="0.01" max="10" step="0.01">
                 </div>
                 <div class="setting-item-block">
                     <label class="setting-label">Max files per part (0 = unlimited)</label>
@@ -152,6 +166,7 @@
     const TreeHooks = {
         renderBadges: renderBadgesInto,
         onFileClick: async (entry, div) => {
+            if (operationActive) return;
             const action = FileFlow.actions.ActionManager.resolve(State.appSettings.actionMode);
             if (action && action.shouldApply(entry)) {
                 applyActionResult(entry, div, await action.execute(entry));
@@ -174,7 +189,12 @@
         });
     }
 
+    let renderGeneration = 0;
+    function cancelRender() { renderGeneration++; }
+
     async function renderFileList() {
+        const generation = ++renderGeneration;
+        const isCurrent = () => generation === renderGeneration;
         const list = $('file-list');
         if (!list) return;
         const matcher = Glob.createMatcher(State.searchQuery);
@@ -206,14 +226,15 @@
                     const items = await FileFlow.utils.Entries.collectFiles(State.currentRootEntries, {
                         matcher, excludeDots: State.appSettings.excludeDots
                     });
+                    if (!isCurrent()) return;
                     Status.show('Finalizing UI...', true);
                     await FileFlow.views.List.renderFlatList(list, items, (done, total) => {
-                        Status.show(`Processing files... (${done} / ${total})`, true);
-                    });
-                    Status.hide(500);
+                        if (isCurrent()) Status.show(`Processing files... (${done} / ${total})`, true);
+                    }, isCurrent);
+                    if (isCurrent()) Status.hide(500);
                 } catch (e) {
                     console.error(e);
-                    Status.error('List render failed');
+                    if (isCurrent()) Status.error('List render failed');
                 }
             }
         } else {
@@ -320,7 +341,7 @@
 
             // Default state
             let currentMode = projects.length > 0 ? 'vcxproj' : 'folder_structure';
-            let currentExt = config.ext || '.md';
+            const currentExt = '.md';
             let currentPartSizeMB = config.maxPartSizeBytes
                 ? config.maxPartSizeBytes / (1024 * 1024)
                 : 4;
@@ -342,11 +363,8 @@
                     </div>
 
                     <div class="option-section">
-                        <label class="option-label">出力拡張子 (Format)</label>
-                        <div class="segmented-control" id="export-ext-toggle">
-                            <button type="button" class="segment-btn ${currentExt === '.md' ? 'active' : ''}" data-ext=".md">.md (OKF Markdown)</button>
-                            <button type="button" class="segment-btn ${currentExt === '.txt' ? 'active' : ''}" data-ext=".txt">.txt (Text)</button>
-                        </div>
+                        <label class="option-label">出力形式</label>
+                        <span>OKF v0.2 / Markdown (.md)</span>
                     </div>
                 </div>
 
@@ -382,7 +400,7 @@
                 </div>
 
                 <div class="export-size-bar">
-                    <div class="folder-preview-note">全出力ファイルは50万語未満になるよう自動分割されます（本文・index・CSV共通）。</div>
+                    <div class="folder-preview-note">全出力ファイルは推定50万語未満に分割されます（本文・索引・CSV共通）。入力先の語数カウントとは異なる場合があります。</div>
                 </div>
 
                 <div class="stats-summary vcxproj-summary">
@@ -551,16 +569,6 @@
                 });
             });
 
-            // Ext switch
-            modal.querySelectorAll('#export-ext-toggle .segment-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    modal.querySelectorAll('#export-ext-toggle .segment-btn').forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    currentExt = btn.getAttribute('data-ext');
-                    updatePreview();
-                });
-            });
-
             // Size presets
             modal.querySelectorAll('.size-preset-btn').forEach(btn => {
                 btn.addEventListener('click', () => {
@@ -620,13 +628,13 @@
 
                 modal.classList.add('hidden');
                 try {
-                    await FileFlow.llmExport.exportForLLM({
+                    await runOperation(() => FileFlow.llmExport.exportForLLM({
                         selectedProjectNames: selectedNames,
                         mode: currentMode,
                         ext: currentExt,
                         maxPartSizeBytes: currentPartSizeMB > 0 ? currentPartSizeMB * 1024 * 1024 : 0,
                         maxFilesPerPart: currentMaxFiles
-                    });
+                    }));
                 } catch (err) {
                     console.error('Export error:', err);
                     Status.error('Export failed: ' + err.message);
@@ -681,13 +689,14 @@
     //  Export
     // =====================
 
+    FileFlow.ui.runOperation = runOperation;
     FileFlow.ui.Status = Status;
     FileFlow.ui.initModals = initModals;
     FileFlow.ui.applyActionResult = applyActionResult;
     FileFlow.ui.renderBadgesInto = renderBadgesInto;
     FileFlow.ui.TreeHooks = TreeHooks;
     FileFlow.ui.Render = {
-        renderFileList, applyFilter: renderFileList,
+        renderFileList, applyFilter: renderFileList, cancel: cancelRender,
         downloadCsv: (...args) => FileFlow.views.List.downloadCsv(...args)
     };
     FileFlow.ui.Stats = {

@@ -61,6 +61,11 @@
                 if (hooks.onFileClick) hooks.onFileClick(entry, div);
             });
         }
+        if (!entry.isDirectory) {
+            var matcher = U().Glob.createMatcher(S().searchQuery);
+            var rel = U().Entries.buildRelPath(entry, S().currentRootEntries.map(function (r) { return r.name; })) || entry.name;
+            if (matcher && !matcher(entry.name, rel)) li.classList.add('filtered-out');
+        }
         return li;
     }
 
@@ -76,9 +81,9 @@
             if (arrow) arrow.style.transform = 'rotate(0deg)';
             return Promise.resolve();
         }
-        var load = (li.dataset.loaded === 'false')
-            ? loadChildren(li.entry, nested).then(function () { li.dataset.loaded = 'true'; })
-            : Promise.resolve();
+        var load = li.loading || ((li.dataset.loaded === 'false')
+            ? (li.loading = loadChildren(li.entry, nested).then(function () { li.dataset.loaded = 'true'; li.loading = null; }))
+            : Promise.resolve());
         return load.then(function () {
             nested.classList.add('expanded');
             div.classList.add('open');
@@ -287,50 +292,57 @@
     }
 
     // fileEntries: [{entry, relPath}]（モデル層から受領）
-    function renderFlatList(listEl, fileEntries, onProgress) {
+    function renderFlatList(listEl, fileEntries, onProgress, isCurrent) {
+        isCurrent = isCurrent || function () { return true; };
+        FF.views.List.reset();
+        if (!window.gridjs) return Promise.reject(new Error('Grid.js is not loaded. Run setup.sh.'));
         listEl.innerHTML = '';
         listEl.classList.remove('file-tree');
         listEl.classList.add('file-grid');
 
         var gridData = [];
-        var CHUNK = (FF.constants && FF.constants.LIST_CHUNK) || 1000;
+        var CHUNK = 32;
         var showFull = S().appSettings.showFullPath;
         var i = 0;
 
         function processChunk() {
+            if (!isCurrent()) return Promise.resolve();
             var chunk = fileEntries.slice(i, i + CHUNK);
-            var jobs = chunk.map(function (item) {
+            var jobs = chunk.map(function (item, offset) {
                 var pathKey = item.entry.fullPath || item.relPath;
                 var meta = S().getMeta(pathKey);
-                var type = item.entry.name.indexOf('.') >= 0
-                    ? item.entry.name.split('.').pop().toLowerCase() : '';
+                var displayPath = U().outputPath(item);
+                var displayName = displayPath.split('/').pop();
+                var type = displayName.indexOf('.') >= 0 ? displayName.split('.').pop().toLowerCase() : '';
+                var rowIndex = i + offset;
                 if (meta && meta.size !== undefined && meta.size !== '') {
                     var det = meta.detectionInfo || {};
                     var dn = meta.newFilename || item.entry.name;
-                    gridData.push([
-                        showFull ? (item.relPath || dn) : dn,
+                    gridData[rowIndex] = [
+                        showFull ? displayPath : dn,
                         meta.size,
                         (meta.date === undefined || meta.date === null) ? '' : meta.date,
                         type,
                         det.encoding || meta.encoding || '-',
                         det.eol || meta.eol || '-'
-                    ]);
+                    ];
                     return Promise.resolve();
                 }
                 return U().readEntryFile(item.entry).then(function (file) {
                     var size = file.size;
                     var date = file.lastModified;
                     return U().Detect.detectFileInfo(file).then(function (info) {
+                        if (!isCurrent()) return;
                         S().updateMeta(pathKey, { size: size, date: date, encoding: info.encoding, eol: info.eol });
                         var m2 = S().getMeta(pathKey) || {};
                         var name2 = m2.newFilename || item.entry.name;
-                        gridData.push([
-                            showFull ? (item.relPath || name2) : name2,
+                        gridData[rowIndex] = [
+                            showFull ? displayPath : name2,
                             size, date, type, info.encoding, info.eol
-                        ]);
+                        ];
                     });
                 }).catch(function () {
-                    gridData.push([showFull ? (item.relPath || item.entry.name) : item.entry.name, '', '', type, '-', '-']);
+                    gridData[rowIndex] = [showFull ? displayPath : displayName, '', '', type, '-', '-'];
                 });
             });
             return Promise.all(jobs).then(function () {
@@ -343,6 +355,7 @@
         }
 
         return processChunk().then(function () {
+            if (!isCurrent()) return;
             originalGridData = gridData;
             currentGridData = gridData;
             activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
@@ -406,6 +419,9 @@
         buildCsvText: buildCsvText,
         getCurrentData: function () { return currentGridData; },
         reset: function () {
+            if (gridInstance) gridInstance.destroy();
+            var menu = document.getElementById('grid-filter-menu');
+            if (menu) menu.classList.add('hidden');
             gridInstance = null; originalGridData = []; currentGridData = [];
             activeFilters = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [] };
             currentSort = { colIndex: null, direction: 'asc' };

@@ -1,205 +1,82 @@
-# LLMエージェント向け OKF 準拠ソースコード統合エクスポート仕様書
+# LLMエクスポート形式 — OKF v0.2
 
-## 1. 概要 (Overview)
+準拠対象は [Open Knowledge Format Specification v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md)。出力はUTF-8 Markdownと補助CSVを含むZIP。OKFの文書構造・来歴を表現するもので、入力先がリンクを自動参照することや回答精度を保証するものではない。
 
-本機能は、Visual Studio（C/C++/C#）プロジェクトや各種言語（Python, Node.js, Go, Rust, Java 等）のソースコードを、Google Cloud 提唱の **Open Knowledge Format (OKF)** に準拠した構造化 Markdown / テキストファイルとして一括統合エクスポートするための機能です。
+## ファイル構成
 
-### 主な特徴
-- **2つの解析モード**:
-  - **vcxproj モード**: `.vcxproj` や `.vcxproj.filters` の XML 解析により、ビルド設定 (`Defines`, `IncludeDirs`) と仮想フィルタ構造を保持。
-  - **フォルダ構造モード**: ディスク上の実際の物理ディレクトリ階層をアスキー・ディレクトリツリー図としてテキストヘッダーに可視化。
-- **自動判別 ＆ 手動選択**: フォルダドロップ時に `.vcxproj` の有無で初期モードを自動決定。プレビューモーダル上でいつでも切り替え可能。
-- **OKF 準拠構造化フォーマット**: 最先頭に YAML Frontmatter を配置し、各ファイルブロックを YAML メタデータ ＋ 言語別コードフェンス（` ```cpp `, ` ```python ` 等）で厳密に保護。
-- **拡張子選択機能**: 出力形式として `.md` (Markdown) または `.txt` (Text) を選択可能。
-- **二重制限の分割サイズ**: 容量制限（1MB, 2MB, 4MB (LLM標準), 8MB, 16MB, カスタムMB, 一括）と件数制限（100/500/1000/2500件、制限なし、カスタム）の厳しい方でパート分割。1000万行級でもソース上限・件数上限の双方に収まる。
-- **パート単体でも構造を保持**: 各パートのヘッダーに当パートのファイル目次＋ディレクトリサブツリー（ASCII図）を同梱。パート数が32以下の場合は全パートマップも付帯し、どのパート単体からでも全体像を復元可能。
-- **全パート共通グローバルインデックス**: `index.md`（All Files肥大時は `index.md` + `index_files_*` に自動分割）に完全なディレクトリ集計・パート対応・全ファイル一覧を掲載。
-- **メタデータ CSV 同梱**: モードに応じて `vcxproj_list.csv` または `folder_structure.csv` と、全対象明細 `target_files_list.csv` を同梱。
-- **RAGノイズ除去**: `node_modules`、`dist`、`build`、`__pycache__`、 minified/bundle 等の生成物は既定の除外パターンで本文から除外する（indexには `excluded` として記録）。パターンは設定で変更できる。
-- **README優先**: `README.*` を各モードの先頭に配置し、LLMが概要から読み進められるようにする。
-
----
-
-## 2. 成果物の構成 (Export Artifacts Structure)
-
-エクスポート実行時、以下のファイル群を含む ZIP アーカイブがダウンロードされます。
-
-```
-<root_name>_llm_export.zip
-├── index.md                          # OKF コードベースインデックス（最初に読み込むべき全体目次。肥大時は index_files_* を併用）
-├── <root_name>_src_001_of_003.md    # OKF 統合ソースコード Part 1 (拡張子: .md または .txt)
-├── <root_name>_src_002_of_003.md    # OKF 統合ソースコード Part 2
-├── <root_name>_src_003_of_003.md    # OKF 統合ソースコード Part 3
-├── vcxproj_list.csv                  # vcxproj モード時: ビルド定義一覧
-├── folder_structure.csv              # フォルダ構造モード時: ディレクトリ階層一覧
-└── target_files_list.csv             # 統合テキストに含まれる全対象ファイル一覧
+```text
+index.md                         # ルートのリンク付き目次
+codebase.md                      # 全体概要・集計・ファイル明細
+index_files_002_of_N.md           # 明細が大きい場合の続き
+<root>_src_001_of_003.md           # ソース本文パート
+<root>_src_002_of_003.md
+<root>_src_003_of_003.md
+target_files_list.csv             # 本文出力に成功したファイル
+export_report.csv                # 成功・除外・失敗の記録
+folder_structure.csv             # folder_structureモード
+vcxproj_list.csv                  # vcxprojモード
 ```
 
-> **LLM投入順序**: `index.md` を最初のソースとしてアップロードし、その後にパートファイル（`*_src_*`）を追加してください。
+CSVも推定語数上限で分割することがあり、その場合は連番名となる。モード別CSVはいずれかを出力する。
 
----
+## ルート目次
 
-## 3. OKF 統合ファイル (`.md` / `.txt`) のフォーマット仕様
-
-各統合ファイルは以下のセクションで構成されます。
-
-### 3.1 OKF YAML Frontmatter
-ファイル最先頭に配置される、エクスポート全体のメタデータです。
+予約ファイル `index.md` は概念文書ではなく、各文書へのMarkdownリンクと短い説明を持つ目次。frontmatterは次のバージョン宣言だけとし、`type` や集計値を入れない。
 
 ```yaml
 ---
-type: codebase_export
-format_version: "1.0-okf"
-title: "TestEngine Source Code Export (Part 1/3)"
-description: "Consolidated codebase export formatted for LLM agents"
-export_mode: "vcxproj"
+okf_version: "0.2"
+---
+```
+
+概要・ファイル明細とソースコードのグループに分ける。リンク先は実際の生成ファイル名から作り、特殊文字をURLエンコードする。
+
+## 概念文書のfrontmatter
+
+`codebase.md` は `type: codebase_overview`、後続明細は `codebase_index_shard`、本文は `codebase_export`。これらはFileFlowが定義するカスタム型。例:
+
+```yaml
+---
+type: "codebase_export"
+title: "example — Source Code (Part 1/3)"
+description: "Source code with original paths and file boundaries."
+tags: ["codebase", "source-code"]
+generated: {"by":"process:fileflow-export","at":"2026-10-08T00:00:00.000Z"}
+sources: [{"resource":"Local input file: src/main.js","title":"src/main.js","last_modified":"2026-10-07T00:00:00.000Z"}]
+export_mode: "folder_structure"
 part_number: 1
 total_parts: 3
-file_count: 142
-total_size_bytes: 3840120
-generated_at: "2026-07-30T09:20:00.000Z"
-entry_points:
-  - "src/main.cpp"
-  - "CMakeLists.txt"
+file_count: 12
+total_size_bytes: 32768
+entry_points: ["src/main.js"]
 ---
 ```
 
-### 3.2 ヘッダーセクション（当パートファイル目次 ＆ index.md 参照）
+シリアライズにはJSON互換の引用符・配列・オブジェクトを使い、引用符やバックスラッシュを含むパスでも有効なYAMLにする。`generated.at` は生成全体で共通。`sources.resource` の `Local input file: ...` は入力スナップショット内の範囲記述であり、ZIP内のファイルへのリンクではない。本文はパート内に埋め込まれる。ファイル更新日時が取得できた場合だけ `last_modified` を記録する。
 
-トークン効率とスケーラビリティを最大化するため、全体の完全なディレクトリ構造および全ファイル一覧は `index.md`（肥大時は `index_files_*` に分割）に集約しています。各パートファイルのヘッダーには、概要・ビルド定義・**当パートのファイル目次＋ディレクトリサブツリー**（＋32パート以下時は全パートマップ）を掲載し、パート単体でも構造が失われません。
+概要の入力元は `Local directory snapshot: ...`、明細シャードの入力元は `/codebase.md`。独立検証を実施していないため `verified` は出力しない。旧独自フィールド `format_version: "1.0-okf"` と `generated_at` は使用しない。
 
-```markdown
-# Project Overview & Structure
-- **Root Workspace**: `TestEngine`
-- **Export Mode**: `Visual Studio (vcxproj)`
-- **Total Project Files**: 420 | **Files in Part 1/3**: 142
-- **Note**: See `index.md` for complete directory structure, all files index, and part mapping.
+## 本文パート
 
-## File Index — Part 1 of 3
+- 全体目次・概要へのリンク、当パートのファイル目次とディレクトリサブツリーを持つ。
+- サブツリーは300行までとし、打ち切りを明示する。全パートマップは32パート以下の場合に掲載する。
+- 各ファイルは `## File:` 見出し、ルート相対パス等のYAMLメタデータ、言語別コードフェンス、パス付き末尾フッターで囲む。
+- ファイルメタデータは `path`、`folder`、`extension`、`size_bytes`、必要に応じて `project`、`filter`、`chunk`。容量は元ファイルの値。
+- 本文内のフェンスより長いフェンスを使う。分割されたファイルには `(split k/n)` を付け、断片の順序を示す。
+- `entry_points` はファイル名等に基づく候補であり、実際の起動経路を解析・証明した情報ではない。
 
-| # | Path | Size |
-|---|---|---|
-| 1 | `src/main.cpp` [TestEngine] | 2.3 KB |
-| 2 | `src/core/Engine.cpp` [TestEngine] | 14.9 KB |
-| ... | ... | ... |
+## 全体概要・明細
 
----
+`codebase.md` に全体の対象数・成功数・未出力数、プロジェクト情報、ディレクトリ集計、本文パートへのリンク、ファイル別状態と所属パートを記録する。明細が大きい場合は行単位で `index_files_*` に分割する。分割ファイルは複数パートに対応する。
 
-# Source Code Section
-```
+`exported_text_files` と対象CSVは実際に本文へ出力できたファイルだけを数える。未出力の理由は `export_report.csv` を参照する。`non-target` を一律にバイナリと解釈しない。全対象が読み取り失敗した場合も概要・レポートを出力する。
 
-### 3.3 ソースコードブロック (OKF File Block)
+## 分割・検証
 
-各ソースファイルは、ファイル単位の H2 見出し、YAML メタデータ、およびコードフェンスで囲まれて出力されます。
-末尾にはパス付きフッター（`*End of file \`path\`*`）を付け、RAGのチャンク切断面のどちら側でも帰属が復元できるようにします。
-本文にフェンス記号（` ``` `）が含まれる場合は自動で長いフェンスに切り替え、ブロック構造の破損を防ぎます。
-パート上限を超える単一ファイルは行単位でチャンク分割し、`## File: \`path\` (split k/n)` の継続見出しで出力します（indexの Part 列には `2, 3` のように複数番号が入ります）。
+現行設定はパート容量（既定4MiB）、元ファイル件数（既定1000）、推定語数（50万未満）のうち厳しい条件で分割する。単一ファイル上限は既定1MiBで、超過ファイルは除外する。UIや保存済み設定の詳細は [export-pipeline.md](export-pipeline.md)。
 
-```markdown
-## File: `src/core/Engine.cpp`
+完成した本文・概要・明細・ルート目次についてBOM込みバイト数と推定語数を確認する。本文は異なる元ファイルの件数も検証する。CSVは推定語数で分割し、パート容量設定は適用しない。ヘッダーや単一索引行など分割できない構造が上限を超える場合は明示的なエラーになる。
 
-```yaml
-path: "src/core/Engine.cpp"
-folder: "src/core"
-project: "TestEngine"
-filter: "Source Files/Core"
-extension: ".cpp"
-size_bytes: 15234
-```
+語数は空白区切り語数とCJK文字数からの推定で、トークン数ではなく、外部サービスのカウントとも同一ではない。OKF概念文書は `.md` 固定。通常のファイル操作としての「Add .txt」は別機能。
 
-```cpp
-#include "Engine.h"
-
-namespace Core {
-    Engine::Engine() {}
-}
-```
-
-*End of file `src/core/Engine.cpp`*
-```
-
----
-
-## 4. メタデータ CSV 仕様
-
-### 4.1 `vcxproj_list.csv` (vcxproj モード時)
-| カラム名 | 説明 | 例 |
-|---|---|---|
-| `Project Name` | プロジェクト名 | `TestEngine` |
-| `Project Path` | `.vcxproj` の相対パス | `test_data/vs_project/TestEngine.vcxproj` |
-| `Configurations` | ターゲット構成の一覧 | `Debug\|x64; Release\|x64` |
-| `Sources` | C/C++ ソースファイル数 | `142` |
-| `Headers` | ヘッダーファイル数 | `89` |
-| `Resources` | リソースファイル数 | `2` |
-| `Preprocessor Defines` | プリプロセッサ定義 | `WIN32; _DEBUG; ENGINE_DLL` |
-| `Include Directories` | 追加インクルードディレクトリ | `../include; $(SolutionDir)common` |
-
-### 4.2 `folder_structure.csv` (フォルダ構造モード時)
-| カラム名 | 説明 | 例 |
-|---|---|---|
-| `Folder Path` | 相対フォルダパス | `src/core` |
-| `Parent Folder` | 親フォルダ | `src` |
-| `Depth` | 階層の深さ | `2` |
-| `File Count` | フォルダ直下の対象ファイル数 | `5` |
-| `Total Size (Bytes)` | フォルダ直下ファイルの合計サイズ | `45120` |
-
-### 4.3 `target_files_list.csv` (統合対象全明細)
-| カラム名 | 説明 | 例 |
-|---|---|---|
-| `File Path` | 相対ファイルパス | `src/core/Engine.cpp` |
-| `Project Name` | 帰属プロジェクト名 | `TestEngine` |
-| `Filter Path` | VS上の仮想フォルダ（フィルタ）パス | `Source Files/Core` |
-| `Size (Bytes)` | ファイルサイズ | `15234` |
-| `Extension` | 拡張子 | `.cpp` |
-
----
-
-## 5. `index.md` — OKF コードベースインデックス仕様
-
-`index.md` はエクスポート成果物の**マスター目次**として機能し、LLMが最初に読み込むべきファイルです。
-
-### 5.1 OKF YAML Frontmatter
-
-```yaml
----
-type: codebase_index
-format_version: "1.0-okf"
-title: "ProjectName — Codebase Index"
-description: "Complete directory and file index for LLM codebase analysis. Load this file first for structural context."
-export_mode: "vcxproj"
-total_files: 30000
-total_directories: 1200
-total_size_bytes: 450000000
-exported_text_files: 28500
-non_exported_files: 1500
-export_parts: 12
-generated_at: "2026-08-01T12:00:00Z"
----
-```
-
-### 5.2 セクション構成
-
-| セクション | 内容 |
-|---|---|
-| **Export Summary** | ルート名、モード、ファイル数、サイズ等のサマリテーブル |
-| **Build Units** | vcxprojモード時: プロジェクト別のファイル数・Defines・Include Dirs |
-| **Directory Structure** | 全ディレクトリの集約テーブル（ファイル数、エクスポート/非エクスポート、サイズ） |
-| **Export Parts Map** | 各パートファイル名、含まれるファイル数、主要ディレクトリの対応表 |
-| **All Files** | 全ファイル一覧テーブル（パス、サイズ、Type: text/binary/excluded、所属Part番号。分割ファイルは `2, 3` のように複数番号）。パートサイズ上限超過時は `index.md`（先頭）+ `index_files_002_of_N.md` … に自動分割（各シャードは `index.md` への参照付きで自己記述） |
-
----
-
-## 6. LLM への推薦利用手順
-
-1. エクスポートされた ZIP ファイルを解凍します。
-2. LLM のソース追加画面を開きます。
-3. **`index.md` を最初のソースとしてアップロード**します（構造コンテキスト）。
-4. 生成された OKF 統合ファイル (`*_src_001_of_XXX.md` または `.txt`) を追加アップロードします。
-5. ディレクトリ構造やプロジェクト定義を確認したい場合は、同梱されている CSV ファイル (`vcxproj_list.csv` または `folder_structure.csv`) も追加ソースとして投入可能です。
-
----
-
-## 7. 分割設定と関連ドキュメント
-
-- 分割上限は設定モーダルまたはプレビューで変更できる（パート容量上限、パート件数上限、単一ファイル上限、対象拡張子、除外パターン）。分割アルゴリズムの詳細は [export-pipeline.md](export-pipeline.md) を参照。
-- 出力の解釈方法は [ai-format-guide.md](ai-format-guide.md)、全体の要求仕様は [../requirements.md](../requirements.md) を参照。
+利用手順は [ai-format-guide.md](ai-format-guide.md)、今後の設定見直しは [改善計画](../llm-export-improvements.md) を参照。

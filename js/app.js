@@ -70,7 +70,7 @@
             const saved = localStorage.getItem('FileFlowSettings');
             if (saved) {
                 const parsed = JSON.parse(saved);
-                State.appSettings = { ...State.appSettings, ...parsed };
+                State.appSettings = { ...State.appSettings, ...parsed, llmExportConfig: FileFlow.llmExport.normalizeSettings(parsed.llmExportConfig || parsed.notebookLMConfig || {}) };
             }
         } catch (e) { console.warn('Failed to load settings', e); }
 
@@ -125,6 +125,7 @@
             try {
                 Status.show('Scanning files...', true);
                 await new Promise(r => setTimeout(r, 50));
+                State.resetMetadata();
                 State.currentRootEntries = entries;
                 await Render.renderFileList();
                 Status.hide(500);
@@ -162,7 +163,7 @@
 
         // LLM Export settings change handlers
         const saveLLMConfig = () => {
-            const cfg = State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {};
+            const cfg = { ...(State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {}) };
             const partSize = $('llm-max-part-size');
             if (partSize) cfg.maxPartSizeMB = parseFloat(partSize.value) || 4;
             const fileSize = $('llm-max-file-size');
@@ -170,10 +171,14 @@
             const exts = $('llm-extensions');
             if (exts) cfg.sourceExtensions = exts.value;
             const maxFiles = $('llm-max-files-per-part');
-            if (maxFiles) cfg.maxFilesPerPart = Math.max(0, parseInt(maxFiles.value, 10) || 0);
+            if (maxFiles) cfg.maxFilesPerPart = maxFiles.value;
             const excludes = $('llm-excludes');
             if (excludes) cfg.excludePatterns = excludes.value;
-            State.appSettings.llmExportConfig = cfg;
+            const normalized = FileFlow.llmExport.normalizeSettings(cfg);
+            State.appSettings.llmExportConfig = normalized;
+            if (partSize) partSize.value = normalized.maxPartSizeMB;
+            if (fileSize) fileSize.value = normalized.maxSingleFileSizeMB;
+            if (maxFiles) maxFiles.value = normalized.maxFilesPerPart;
             if (State.appSettings.notebookLMConfig) delete State.appSettings.notebookLMConfig;
         };
         ['llm-max-part-size', 'llm-max-file-size', 'llm-extensions', 'llm-max-files-per-part', 'llm-excludes'].forEach(id => {
@@ -191,6 +196,8 @@
 
         // Clear
         $('clear-btn').addEventListener('click', () => {
+            Render.cancel();
+            FileFlow.views.List.reset();
             State.currentRootEntries = [];
             State.entryMetadata = {};
             $('file-list').innerHTML = '';
@@ -199,7 +206,7 @@
         });
 
         // Apply Action
-        $('apply-btn').addEventListener('click', async () => {
+        $('apply-btn').addEventListener('click', () => FileFlow.ui.runOperation(async () => {
             const action = ActionManager.resolve(State.appSettings.actionMode);
             if (!action) return;
 
@@ -224,29 +231,28 @@
                 return true;
             }, { excludeDots: State.appSettings.excludeDots });
 
-            if (State.appSettings.viewMode === 'list') Render.renderFileList();
+            if (State.appSettings.viewMode === 'list') await Render.renderFileList();
             Status.hide();
-        });
+        }));
 
         // Downloads
-        $('download-zip-btn').addEventListener('click', async () => {
+        $('download-zip-btn').addEventListener('click', () => FileFlow.ui.runOperation(async () => {
             Status.show('Creating ZIP...');
             try { await FileFlow.utils.Zip.downloadZip(); }
-            catch (e) { console.error(e); Status.error('ZIP creation failed'); }
-            finally { Status.hide(); }
-        });
+            catch (e) { console.error(e); Status.error(e.message || 'ZIP creation failed'); }
+        }));
 
         $('download-csv-btn').addEventListener('click', () => {
             if (State.appSettings.viewMode !== 'list') { Status.error('CSV download is only available in List View'); return; }
-            try { Render.downloadCsv(); Status.show('CSV downloaded successfully'); }
+            try { if (Render.downloadCsv()) Status.show('CSV downloaded successfully'); }
             catch (e) { console.error(e); Status.error('CSV creation failed'); }
         });
 
         // LLM Export (Preview & Export)
-        $('export-llm-btn').addEventListener('click', async () => {
+        $('export-llm-btn').addEventListener('click', () => FileFlow.ui.runOperation(async () => {
             try { await FileFlow.llmExport.showVcxprojPreviewModal(); }
             catch (e) { console.error(e); Status.error('Failed to open VS Projects preview: ' + e.message); }
-        });
+        }));
 
         // Stats
         $('stats-btn').addEventListener('click', () => FileFlow.ui.Stats.show());

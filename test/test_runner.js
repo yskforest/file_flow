@@ -448,12 +448,12 @@
         const items = [mk('src/a.cpp', 'int a;\n'), mk('src/b.cpp', 'int b;\n')];
         const { results } = await SourceConsolidator.consolidate({
             fileItems: items, projects: [], mode: 'folder_structure', ext: '.md',
-            maxPartSize: 1, maxSingleFileSize: 0, onProgress: null
+            maxPartSize: 16384, maxFilesPerPart: 1, maxSingleFileSize: 0, onProgress: null
         });
         assert.ok(results.length >= 2);
         assert.ok(results[0].filename.endsWith('.md'));
         const text = await results[0].blob.text();
-        assert.ok(text.includes('type: codebase_export'));
+        assert.ok(text.includes('type: "codebase_export"'));
         assert.ok(text.includes('## File:'));
     });
 
@@ -468,7 +468,7 @@
     });
 
     test("llmExport — VcxprojParser (browser only)", () => {
-        if (typeof DOMParser === 'undefined') return; // Node.js ではスキップ
+        if (typeof DOMParser === 'undefined') return { skipped: true }; // Browser test executes XML parsing
         const { VcxprojParser } = FileFlow.llmExport;
         const xml = '<?xml version="1.0"?><Project><ItemGroup><ClCompile Include="src\\a.cpp" /></ItemGroup></Project>';
         const info = VcxprojParser.parseProject(xml, '/root/p.vcxproj');
@@ -617,21 +617,24 @@
         const t = FileFlow.llmExport._internals;
         FileFlow.state.currentRootEntries = [];
         const info = [];
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 100; i++) {
             info.push({ relativePath: `src/f${i}.cpp`, size: 100, extension: '.cpp', isExportTarget: true });
         }
         const files = t.generateIndexMd({
             rootName: 'root', mode: 'folder_structure', ext: '.md',
             allFilesInfo: info, fileItems: info.map(f => ({ ...f, projectName: '', filter: '' })),
             results: [{ filename: 'x' }], partFileList: [info.map(f => ({ path: f.relativePath, project: '', filter: '', size: 100 }))],
-            projects: [], maxIndexBytes: 700
+            projects: [], maxIndexBytes: 4000
         });
         assert.ok(files.length > 1);
+        files.forEach(f => assert.ok(f.blob.size <= 4000));
         assert.equal(files[0].filename, 'index.md');
-        assert.ok(files[1].filename.startsWith('index_files_'));
-        const shardText = await files[1].blob.text();
+        assert.equal(files[1].filename, 'codebase.md');
+        const shard = files.find(f => f.filename.startsWith('index_files_'));
+        assert.ok(shard);
+        const shardText = await shard.blob.text();
         assert.ok(shardText.includes('codebase_index_shard'));
-        assert.ok(shardText.includes('Load `index.md` first'));
+        assert.ok(shardText.includes('[index.md](index.md)'));
     });
 
     test("llmExport — getExportConfig defaults maxFilesPerPart", () => {
@@ -785,10 +788,16 @@
         if (onStart) onStart(tests.length);
         let passed = 0;
         let failed = 0;
+        let skipped = 0;
 
         for (const t of tests) {
             try {
-                await t.fn();
+                const result = await t.fn();
+                if (result && result.skipped) {
+                    skipped++;
+                    if (onTestResult) onTestResult(t.name, true, null, 'skipped');
+                    continue;
+                }
                 passed++;
                 if (onTestResult) onTestResult(t.name, true, null);
             } catch (err) {
@@ -797,8 +806,8 @@
             }
         }
 
-        if (onComplete) onComplete(passed, failed, tests.length);
-        return { passed, failed, total: tests.length };
+        if (onComplete) onComplete(passed, failed, tests.length, skipped);
+        return { passed, failed, skipped, total: tests.length };
     }
 
     // --- Export ---

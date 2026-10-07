@@ -1,0 +1,31 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const {spawnSync} = require('node:child_process');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fileflow-setup-'));
+try {
+    fs.copyFileSync('setup.sh',path.join(dir,'setup.sh'));
+    fs.mkdirSync(path.join(dir,'lib'));
+    for(const file of ['jszip.min.js','gridjs.umd.js','gridjs-mermaid.min.css']) fs.copyFileSync('lib/'+file,path.join(dir,'lib',file));
+    let result=spawnSync('sh',[path.join(dir,'setup.sh')],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    assert.match(result.stdout,/verified/);
+    const original='existing broken content';
+    fs.writeFileSync(path.join(dir,'lib/jszip.min.js'),original);
+    fs.mkdirSync(path.join(dir,'bin'));
+    const mock=path.join(dir,'bin/curl');
+    fs.writeFileSync(mock,'#!/bin/sh\nexit 22\n',{mode:0o755});
+    const env={...process.env,PATH:path.join(dir,'bin')+':'+process.env.PATH};
+    result=spawnSync('sh',[path.join(dir,'setup.sh')],{encoding:'utf8',env});
+    assert.notEqual(result.status,0);
+    assert.equal(fs.readFileSync(path.join(dir,'lib/jszip.min.js'),'utf8'),original);
+    assert.deepEqual(fs.readdirSync(path.join(dir,'lib')).filter(f=>f.startsWith('.download.')),[]);
+    fs.writeFileSync(mock,'#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n if [ "$1" = "--output" ]; then shift; printf "corrupt data" > "$1"; exit 0; fi\n shift\ndone\nexit 1\n',{mode:0o755});
+    result=spawnSync('sh',[path.join(dir,'setup.sh')],{encoding:'utf8',env});
+    assert.notEqual(result.status,0);assert.match(result.stderr,/checksum mismatch/);
+    assert.equal(fs.readFileSync(path.join(dir,'lib/jszip.min.js'),'utf8'),original);
+    assert.deepEqual(fs.readdirSync(path.join(dir,'lib')).filter(f=>f.startsWith('.download.')),[]);
+    console.log('Setup: checksum validation, HTTP failure, corruption, atomic replacement and cleanup passed.');
+} finally {fs.rmSync(dir,{recursive:true,force:true});}

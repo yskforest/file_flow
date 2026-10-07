@@ -59,6 +59,9 @@ loadScript('../js/core.js');
 loadScript('../js/actions.js');
 loadScript('../js/views.js');
 loadScript('../js/ui.js');
+loadScript('../js/export-common.js');
+loadScript('../js/export-consolidator.js');
+loadScript('../js/export-format.js');
 loadScript('../js/export-llm.js');
 
 // Load Test Cases and runner
@@ -70,7 +73,8 @@ TestRunner.run(
     (total) => {
         console.log(`Total tests registered: ${total}\n`);
     },
-    (name, isPass, error) => {
+    (name, isPass, error, status) => {
+        if (status === 'skipped') { console.log(`  [ SKIP ] ${name}`); return; }
         if (isPass) {
             console.log(`  [ PASS ] ${name}`);
         } else {
@@ -84,9 +88,9 @@ TestRunner.run(
             }
         }
     },
-    (passed, failed, total) => {
+    (passed, failed, total, skipped) => {
         console.log("\n============================================");
-        console.log(`Tests completed: ${passed}/${total} passed.`);
+        console.log(`Tests completed: ${passed}/${total} passed, ${skipped} skipped.`);
         if (failed > 0) {
             console.log(`Status: FAILED (${failed} failed)`);
             process.exit(1);

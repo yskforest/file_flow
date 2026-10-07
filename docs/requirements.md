@@ -15,8 +15,8 @@
 - **フロントエンド**: HTML5, CSS (Vanilla, CSS Variablesダークテーマ), JavaScript (Vanilla, IIFEパターン)
 - **外部ライブラリ**:
   - JSZip (v3.10.1) をローカル配置（`lib/jszip.min.js` を `setup.sh` で取得）
-  - Grid.js をCDN経由で読み込み（`unpkg.com/gridjs`）
-- **ファイル構成**: `index.html` / `style.css` / `js/state.js` / `js/utils.js` / `js/core.js` / `js/actions.js` / `js/views.js` / `js/ui.js` / `js/export-llm.js` / `js/app.js` / `lib/jszip.min.js`（設計は [design.md](design.md)）
+  - Grid.js (v6.2.0) をローカル配置。JSZipと共に固定URL・SHA-256検証で取得し、セットアップ後の通信は不要
+- **ファイル構成**: `index.html` / `style.css` / `js/state.js` / `js/utils.js` / `js/core.js` / `js/actions.js` / `js/views.js` / `js/ui.js` / `js/export-common.js` / `js/export-consolidator.js` / `js/export-format.js` / `js/export-llm.js` / `js/app.js` / `lib/jszip.min.js`（設計は [design.md](design.md)）
 - **フォーマット規約**:
   - 設定は `localStorage` に JSON 文字列として永続化する。設定ファイルやモックデータを使う拡張では json ではなく yml を使うこと。
 
@@ -56,7 +56,7 @@ Include（`!` なし）と Exclude（`!` 付き）を組み合わせ可能で、
 
 ### 2.5 エクスポート (ZIP / CSV)
 
-- **Download ZIP**: フィルタ後のフォルダ構造を維持したままZIP化する。リネーム適用後のファイル名が反映される。単一フォルダドロップ時はフォルダ名がZIPファイル名になる。未展開のツリーノードも出力対象に含める。
+- **Download ZIP**: フィルタ後のフォルダ構造を維持したままZIP化する。リネーム適用後のファイル名が反映される。単一フォルダドロップ時はフォルダ名がZIPファイル名になる。未展開のツリーノードも出力対象に含める。出力パスの重複時は生成を中止する。読み取り失敗はレポートCSVに記録する。
 - **Download CSV**: リストビュー専用。現在のフィルタ・ソート状態のデータを BOM 付き UTF-8 CSV として出力する。
 
 ### 2.6 統計情報
@@ -84,9 +84,9 @@ Include（`!` なし）と Exclude（`!` 付き）を組み合わせ可能で、
 - **vcxproj/vcxproj.filters 自動検出・解析**: Configuration、Platform、PreprocessorDefinitions、AdditionalIncludeDirectories、ClCompile / ClInclude / ResourceCompile の分類、フィルタ（仮想フォルダ）パスを抽出する。
 - **プレビュー**: 検出プロジェクトの一覧・ビルド定義・件数・概算容量・推定パート数（律速要因付き）を事前確認し、対象プロジェクトを選択できる。
 - **範囲**: ツールバーのGlobフィルタ・対象拡張子・除外パターン（生成物ノイズ除去）が反映される。`README.*` は先頭に配置される。
-- **分割**: パート容量上限とパート件数上限の厳しい方で分割する。パート上限超の単一ファイルは行単位チャンクに分割し、継続見出し（`(split k/n)`）付きで出力する。
-- **構造保持**: 各パートにファイル目次＋ディレクトリサブツリーを同梱する。各ブロックはパス付き見出し・末尾フッターを持ち、本文内のフェンス記号では構造が壊れない。全体索引は `index.md`（肥大時は `index_files_*` に自動分割）に集約する。
-- **メタデータCSV**: `vcxproj_list.csv`（または `folder_structure.csv`）と `target_files_list.csv` を同梱する。
+- **分割**: パート容量上限・件数上限・推定50万語未満の制限で分割する。完成出力のBOM込み容量も検証し、超過時は再分割する。ヘッダーや単一索引行が収まらない上限は明示的なエラーとする。パート上限超の単一ファイルは行単位チャンクに分割し、継続見出し（`(split k/n)`）付きで出力する。
+- **構造保持**: 各パートにファイル目次＋ディレクトリサブツリーを同梱する。各ブロックはパス付き見出し・末尾フッターを持ち、本文内のフェンス記号では構造が壊れない。OKF v0.2のルート `index.md` はリンク付き目次とし、全体概要・索引は `codebase.md`（明細が肥大した場合は `index_files_*` に分割）に集約する。Markdownの概念文書には `type` と生成・入力元情報を付ける。
+- **メタデータCSV**: `vcxproj_list.csv`（または `folder_structure.csv`）と `target_files_list.csv` を同梱する。さらに `export_report.csv` に成功・除外・失敗と理由を記録し、索引・対象CSVを実際の出力結果に合わせる。
 - **文字コード変換**: Shift_JIS、EUC-JP等の非UTF-8ファイルを可能な限りUTF-8に変換する。
 
 出力フォーマットの詳細は [detailed/export-format.md](detailed/export-format.md)、出力の解釈方法は [detailed/ai-format-guide.md](detailed/ai-format-guide.md)、処理フローの詳細は [detailed/export-pipeline.md](detailed/export-pipeline.md) を参照。

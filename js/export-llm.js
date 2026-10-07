@@ -1,863 +1,12 @@
-// FileFlow — LLM OKF Export Module (vcsproj / folder-structure)
+// FileFlow — scan, configuration, preview and export orchestration
 (function () {
+    'use strict';
     const { $, formatBytes, FS, downloadBlob, csvEscape, bomTextBlob, dirnameOf, readEntryFile, normalizeLookupPath, Glob } = FileFlow.utils;
     const State = FileFlow.state;
     const Status = FileFlow.ui.Status;
-
-    // =====================================================================
-    //  Default Configuration
-    // =====================================================================
-
-    const DEFAULT_CONFIG = {
-        mode: 'auto',                            // 'auto' | 'vcxproj' | 'folder_structure'
-        ext: '.md',                              // '.md' | '.txt'
-        maxPartSizeBytes: 4 * 1024 * 1024,       // 4MB per output file
-        maxFilesPerPart: 1000,                   // max files per output part (0 = unlimited)
-        maxSingleFileSizeBytes: 1 * 1024 * 1024,  // Skip files > 1MB by default
-        excludePatterns: '**/node_modules/** **/dist/** **/build/** **/out/** **/target/** **/__pycache__/** **/.venv/** **/*.min.js **/*.min.css **/*.bundle.js',
-        sourceExtensions: new Set([
-            '.cpp', '.c', '.cc', '.cxx', '.h', '.hpp', '.hxx', '.inl',
-            '.cs', '.rc', '.idl', '.def', '.asm', '.s',
-            '.java', '.py', '.js', '.ts', '.jsx', '.tsx',
-            '.xml', '.xaml', '.json', '.yml', '.yaml',
-            '.sql', '.proto', '.thrift',
-            '.hlsl', '.glsl', '.fx',
-            '.cmake', '.mk', '.mak',
-            '.bat', '.cmd', '.sh', '.ps1',
-            '.txt', '.md', '.rst', '.cfg', '.ini', '.conf', '.toml',
-            '.sln', '.vcxproj', '.csproj', '.props', '.targets'
-        ]),
-        chunkSize: 500  // Files per UI-yield chunk
-    };
-
-    // OKFブロック1件あたりのメタデータ・オーバーヘッド概算（割付推定用）
-    const BLOCK_OVERHEAD_EST = 512;
-    // パートヘッダーに埋め込むディレクトリサブツリーの行上限
-    const SUBTREE_MAX_LINES = 300;
-    // パートヘッダーに全パートマップを載せる上限パート数
-    const PARTS_MAP_MAX = 32;
-    // チャンク分割時に確保するヘッダー予備バイト数
-    const CHUNK_RESERVED_BYTES = 8192;
-    // 出力1ファイルあたりの単語数ハード上限（この値未満を保証する。NotebookLM/Gemini Notebook の 500,000 words/source に準拠）
-    const MAX_OUTPUT_WORDS = 500000;
-    // 割付時の単語数ターゲット（ヘッダ誤差分のマージンを確保）
-    const OUTPUT_WORD_TARGET = 450000;
-    // フロントマター+ヘッダ分の概算リザーブ（単語数）
-    const OUTPUT_WORD_RESERVE = 20000;
-    // 単一OKFブロックの単語数上限（ヘッダと同居させるための予算）
-    const SINGLE_BLOCK_WORD_BUDGET = 350000;
-    // index後続シャードのヘッダ概算（単語数）
-    const INDEX_SHARD_HEAD_EST_WORDS = 200;
-
-    /**
-     * 本文を行単位でチャンク分割する（巨大単一ファイル対策）。
-     * 各チャンクは指定バイト予算に収まる。予算内に収まらない1行は文字単位で切断する。
-     * @returns {Array<string>}
-     */
-    function _splitContent(content, budgetBytes, encoder) {
-        const enc = encoder || new TextEncoder();
-        if (!Number.isFinite(budgetBytes)) return [content];
-        const budget = Math.max(budgetBytes, 1024);
-        if (enc.encode(content).length <= budget) return [content];
-        // 改行込みセグメントで分割し、結合で完全復元できるようにする
-        const segs = content.match(/[^\n]*\n|[^\n]+$/g) || [content];
-        const chunks = [];
-        let cur = '';
-        let curBytes = 0;
-        const flush = () => { if (cur) { chunks.push(cur); cur = ''; curBytes = 0; } };
-        for (const seg of segs) {
-            const sb = enc.encode(seg).length;
-            if (sb > budget) {
-                flush();
-                // 長大1行は文字単位で切断（サロゲートペアを壊さないよう Array.from）
-                let piece = '';
-                let pieceBytes = 0;
-                for (const ch of Array.from(seg)) {
-                    const cb = enc.encode(ch).length;
-                    if (pieceBytes + cb > budget && piece) {
-                        chunks.push(piece);
-                        piece = '';
-                        pieceBytes = 0;
-                    }
-                    piece += ch;
-                    pieceBytes += cb;
-                }
-                if (piece) chunks.push(piece);
-                continue;
-            }
-            if (curBytes + sb > budget) flush();
-            cur += seg;
-            curBytes += sb;
-        }
-        flush();
-        return chunks.length ? chunks : [content];
-    }
-
-    // CJK 文字の範囲（ひらがな・カタカナ・漢字・ハングル・全角英数など）
-    const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯！-～]/g;
-
-    /**
-     * 単語数を数える。NotebookLM の 500,000 words 制限に対応するための推定値。
-     * 空白区切りトークン数 + CJK文字数（日本語は分かち書きしないため1字=1語として保守的に加算）。
-     * 英語コードでは空白トークン数が支配的、日本語ではCJK加算が支配的になる。
-     * @returns {number}
-     */
-    function countWords(text) {
-        if (!text) return 0;
-        const cjk = (String(text).match(CJK_RE) || []).length;
-        const tokens = (String(text).match(/\S+/g) || []).length;
-        return tokens + cjk;
-    }
-
-    /**
-     * 本文を単語数予算でチャンク分割する（巨大単一ファイル対策）。
-     * 改行込みセグメント単位で分割し、結合で完全復元できる。
-     * 予算内に収まらない1行は単語ラン単位で切断し、空白なし長大ラン（CJK等）は文字単位で切断する。
-     * @returns {Array<string>}
-     */
-    function _splitContentByWords(content, budgetWords) {
-        if (!Number.isFinite(budgetWords)) return [content];
-        const budget = Math.max(Math.floor(budgetWords), 64);
-        if (countWords(content) <= budget) return [content];
-        const segs = content.match(/[^\n]*\n|[^\n]+$/g) || [content];
-        const chunks = [];
-        let cur = '';
-        let curW = 0;
-        const flush = () => { if (cur) { chunks.push(cur); cur = ''; curW = 0; } };
-        const pushRunSliced = (run) => {
-            // 空白なし長大ラン（CJK等）は文字単位で切断（1字≒1語とみなす）
-            const cps = Array.from(run);
-            for (let i = 0; i < cps.length; i += budget) chunks.push(cps.slice(i, i + budget).join(''));
-        };
-        const splitRuns = (seg) => {
-            // 先頭空白を落とさないよう位置追跡しながら単語ランに分解する
-            const runs = [];
-            const re = /\S+\s*/g;
-            let pos = 0;
-            let m;
-            re.lastIndex = 0;
-            while ((m = re.exec(seg)) !== null) {
-                if (m.index > pos) runs.push(seg.slice(pos, m.index));
-                runs.push(m[0]);
-                pos = m.index + m[0].length;
-                if (m[0].length === 0) break;
-            }
-            if (pos < seg.length) runs.push(seg.slice(pos));
-            if (!runs.length) runs.push(seg);
-            return runs;
-        };
-        for (const seg of segs) {
-            const w = countWords(seg);
-            if (w > budget) {
-                flush();
-                const runs = splitRuns(seg);
-                let piece = '';
-                let pw = 0;
-                const flushPiece = () => { if (piece) { chunks.push(piece); piece = ''; pw = 0; } };
-                for (const run of runs) {
-                    const rw = countWords(run);
-                    if (rw > budget) { flushPiece(); pushRunSliced(run); continue; }
-                    if (pw + rw > budget && piece) flushPiece();
-                    piece += run;
-                    pw += rw;
-                }
-                flushPiece();
-                continue;
-            }
-            if (curW + w > budget) flush();
-            cur += seg;
-            curW += w;
-        }
-        flush();
-        return chunks.length ? chunks : [content];
-    }
-
-    /**
-     * バイト予算と単語数予算の両方を満たすようチャンク分割する。
-     * @returns {Array<string>}
-     */
-    function _splitContentDualWords(content, budgetBytes, budgetWords, encoder) {
-        const first = _splitContent(content, budgetBytes, encoder);
-        if (!Number.isFinite(budgetWords)) return first;
-        const out = [];
-        for (const piece of first) {
-            if (countWords(piece) <= budgetWords) { out.push(piece); continue; }
-            for (const sub of _splitContentByWords(piece, budgetWords)) out.push(sub);
-        }
-        return out.length ? out : [content];
-    }
-
-    /**
-     * 除外パターン（生成物ノイズ除去用）のマッチャーを生成する。空なら null。
-     * 既存のパス対応Globを再利用する。
-     */
-    function createExcludeMatcher(patterns) {
-        const { Glob } = FileFlow.utils;
-        if (!patterns || !patterns.trim()) return null;
-        return Glob.createMatcher(patterns);
-    }
-
-    /**
-     * 事前割付（I/Oなし）: バイト数・単語数・件数の三重制限でファイル群をパートに振り分ける。
-     * 単語数見積りはバイト数で代用する（1語は最低1バイトのため安全側の上限になる）。
-     * effectiveWordLimit が非有限・未指定の場合は単語数制限を適用しない（後方互換）。
-     * @returns {Array<Array<number>>} fileItems へのインデックス配列の配列
-     */
-    function assignParts(fileItems, effectivePartSize, effectiveMaxFiles, effectiveWordLimit) {
-        const groups = [];
-        let cur = [];
-        let curSize = 0;
-        let curEst = 0;
-        const hasWordLimit = Number.isFinite(effectiveWordLimit);
-        const fits = (est) =>
-            (effectivePartSize === Infinity || curSize + est <= effectivePartSize) &&
-            (!hasWordLimit || curEst + est <= effectiveWordLimit) &&
-            (effectiveMaxFiles === Infinity || cur.length < effectiveMaxFiles);
-        fileItems.forEach((item, idx) => {
-            const est = (item.size || 0) + BLOCK_OVERHEAD_EST;
-            if (cur.length > 0 && !fits(est)) {
-                groups.push(cur);
-                cur = [];
-                curSize = 0;
-                curEst = 0;
-            }
-            cur.push(idx);
-            curSize += est;
-            curEst += est;
-        });
-        if (cur.length) groups.push(cur);
-        return groups;
-    }
-
-    /**
-     * パス配列からASCIIサブツリーを生成する（パート内構造の自己記述用）。
-     * @returns {string}
-     */
-    function _buildSubtree(paths, maxDepth = 6, maxLines = SUBTREE_MAX_LINES) {
-        const root = {};
-        const sorted = paths.slice().sort();
-        for (const rel of sorted) {
-            const parts = rel.split('/');
-            let curr = root;
-            for (let i = 0; i < parts.length; i++) {
-                const part = parts[i];
-                const isFile = (i === parts.length - 1);
-                if (!curr[part]) curr[part] = isFile ? null : {};
-                if (!isFile) curr = curr[part];
-            }
-        }
-        const lines = [];
-        let truncated = false;
-        (function formatTree(node, prefix, depth) {
-            if (truncated) return;
-            if (depth > maxDepth) {
-                lines.push(prefix + '└── ... (deeper levels omitted)');
-                return;
-            }
-            const keys = Object.keys(node).sort((a, b) => {
-                const aIsDir = node[a] !== null;
-                const bIsDir = node[b] !== null;
-                if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
-                return a.localeCompare(b);
-            });
-            for (let i = 0; i < keys.length; i++) {
-                if (lines.length >= maxLines) { truncated = true; return; }
-                const key = keys[i];
-                const isLast = (i === keys.length - 1);
-                const isDir = node[key] !== null;
-                lines.push(prefix + (isLast ? '└── ' : '├── ') + key + (isDir ? '/' : ''));
-                if (isDir) formatTree(node[key], prefix + (isLast ? '    ' : '│   '), depth + 1);
-            }
-        })(root, '', 1);
-        if (truncated) lines.push(`... (${sorted.length} paths total, truncated to ${maxLines} lines)`);
-        return lines.join('\n');
-    }
-
-    /**
-     * index後続シャードのヘッダを生成する。
-     */
-    function _buildIndexShardHead(rootName, shardNum, totalShards) {
-        return [
-            '---',
-            'type: codebase_index_shard',
-            'format_version: "1.0-okf"',
-            `title: "${rootName} — Codebase Index (Files ${shardNum}/${totalShards})"`,
-            `index_of: "index.md"`,
-            `shard_number: ${shardNum}`,
-            `total_shards: ${totalShards}`,
-            `generated_at: "${new Date().toISOString()}"`,
-            '---',
-            '',
-            `# ${rootName} — Codebase Index (Files Shard ${shardNum}/${totalShards})`,
-            '',
-            '> Continuation of the All Files table. Load `index.md` first for structural context.',
-            '',
-        ].join('\n') + '\n';
-    }
-
-    // =====================================================================
-    //  VcxprojParser — Parse .vcxproj and .vcxproj.filters XML
-    // =====================================================================
-
-    const VcxprojParser = {
-        parseProject(xmlText, projPath) {
-            const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-            const ns = 'http://schemas.microsoft.com/developer/msbuild/2003';
-
-            const info = {
-                path: projPath,
-                name: projPath.split('/').pop().replace(/\.vcxproj$/i, ''),
-                configurations: [],
-                defines: [],
-                includeDirs: [],
-                sourceFiles: [],      // ClCompile
-                headerFiles: [],      // ClInclude
-                resourceFiles: [],    // ResourceCompile
-                otherFiles: [],       // None, etc.
-                filterMap: {}         // fullPath -> filter path
-            };
-
-            // Extract configurations
-            const configNodes = doc.querySelectorAll('ProjectConfiguration');
-            if (configNodes.length === 0) {
-                const pgNodes = doc.getElementsByTagNameNS(ns, 'ProjectConfiguration');
-                for (const n of pgNodes) {
-                    info.configurations.push(n.getAttribute('Include') || n.textContent.trim());
-                }
-            } else {
-                configNodes.forEach(n => {
-                    info.configurations.push(n.getAttribute('Include') || n.textContent.trim());
-                });
-            }
-
-            const getText = (parent, tag) => {
-                let el = parent.querySelector(tag);
-                if (!el) el = parent.getElementsByTagNameNS(ns, tag)[0];
-                return el ? el.textContent.trim() : '';
-            };
-
-            const defGroups = [...doc.querySelectorAll('ItemDefinitionGroup'),
-                ...doc.getElementsByTagNameNS(ns, 'ItemDefinitionGroup')];
-            for (const g of defGroups) {
-                const defs = getText(g, 'PreprocessorDefinitions');
-                if (defs) {
-                    defs.split(';').forEach(d => {
-                        const t = d.trim();
-                        if (t && t !== '%(PreprocessorDefinitions)' && !info.defines.includes(t))
-                            info.defines.push(t);
-                    });
-                }
-                const incDirs = getText(g, 'AdditionalIncludeDirectories');
-                if (incDirs) {
-                    incDirs.split(';').forEach(d => {
-                        const t = d.trim();
-                        if (t && t !== '%(AdditionalIncludeDirectories)' && !info.includeDirs.includes(t))
-                            info.includeDirs.push(t);
-                    });
-                }
-            }
-
-            const collectItems = (tag, arr) => {
-                const nodes = [...doc.querySelectorAll(tag),
-                    ...doc.getElementsByTagNameNS(ns, tag)];
-                const seen = new Set();
-                for (const n of nodes) {
-                    const inc = n.getAttribute('Include');
-                    if (inc && !seen.has(inc)) {
-                        seen.add(inc);
-                        arr.push(inc.replace(/\\/g, '/'));
-                    }
-                }
-            };
-            collectItems('ClCompile', info.sourceFiles);
-            collectItems('ClInclude', info.headerFiles);
-            collectItems('ResourceCompile', info.resourceFiles);
-            collectItems('None', info.otherFiles);
-
-            return info;
-        },
-
-        parseFilters(xmlText) {
-            const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-            const ns = 'http://schemas.microsoft.com/developer/msbuild/2003';
-            const map = {};
-            const tags = ['ClCompile', 'ClInclude', 'ResourceCompile', 'None'];
-            for (const tag of tags) {
-                const nodes = [...doc.querySelectorAll(tag),
-                    ...doc.getElementsByTagNameNS(ns, tag)];
-                for (const n of nodes) {
-                    const inc = n.getAttribute('Include');
-                    if (!inc) continue;
-                    const path = inc.replace(/\\/g, '/');
-                    let filterEl = n.querySelector('Filter');
-                    if (!filterEl) {
-                        const children = n.getElementsByTagNameNS(ns, 'Filter');
-                        if (children.length) filterEl = children[0];
-                    }
-                    if (filterEl) {
-                        map[path] = filterEl.textContent.trim().replace(/\\/g, '/');
-                    }
-                }
-            }
-            return map;
-        }
-    };
-
-    // =====================================================================
-    //  SourceConsolidator — Merge source files into OKF Markdown parts
-    // =====================================================================
-
-    const SourceConsolidator = {
-
-        /**
-         * Consolidate files into OKF-compliant Markdown / Text files.
-         * 3フェーズ構成: (1) I/Oなし事前割付（バイト・単語・件数）
-         * (2) グループ単位で読み込み→ブロック化→単語数/バイトでサブパートへ再梱包
-         * (3) 実測検証（全出力が50万語未満になるまで超過パートを半分に再分割）。
-         * ユーザのバイト設定が大きくても単語数上限が優先され、必ず50万語未満になる。
-         * @param {object} opts
-         * @param {Array} opts.fileItems
-         * @param {Array} opts.projects
-         * @param {string} opts.mode - 'vcxproj' | 'folder_structure'
-         * @param {string} opts.ext - '.md' | '.txt'
-         * @param {number} opts.maxPartSize - bytes (0 or Infinity for unsplit)
-         * @param {number} opts.maxFilesPerPart - files (0 or Infinity for unlimited)
-         * @param {number} opts.maxSingleFileSize
-         * @param {Function} opts.onProgress
-         * @returns {Promise<{results: Array<{filename: string, blob: Blob}>, partFileList: Array}>}
-         */
-        async consolidate({ fileItems, projects, mode = 'folder_structure', ext = '.md', maxPartSize, maxFilesPerPart, maxSingleFileSize, onProgress }) {
-            const encoder = new TextEncoder();
-            const effectivePartSize = (maxPartSize && maxPartSize > 0) ? maxPartSize : Infinity;
-            const effectiveMaxFiles = (maxFilesPerPart && maxFilesPerPart > 0) ? maxFilesPerPart : Infinity;
-
-            // Oversized pre-filter（scan時の size 判明分を先に除外。実測フォールバックあり）
-            const targets = (maxSingleFileSize && maxSingleFileSize > 0)
-                ? fileItems.filter(item => !(item.size > maxSingleFileSize))
-                : fileItems.slice();
-
-            // Phase 1: 事前割付（バイト・単語・件数の三重制限）
-            const groups = assignParts(targets, effectivePartSize, effectiveMaxFiles, OUTPUT_WORD_TARGET);
-            const rootName = State.currentRootEntries.length === 1
-                ? State.currentRootEntries[0].name : 'project';
-            const cleanExt = ext.startsWith('.') ? ext : '.' + ext;
-            const entryPoints = _detectEntryPoints(targets);
-
-            // Phase 2: グループ単位ストリーミング読み込み→サブパートへ再梱包
-            // グループはI/Oバッチの区切りであり、パート境界にはしない（末尾の微小パートを出さないよう梱包状態をグループ跨ぎで継続する）
-            const chunkByteBudget = effectivePartSize === Infinity
-                ? Infinity
-                : effectivePartSize - CHUNK_RESERVED_BYTES;
-            const bodyWordBudget = OUTPUT_WORD_TARGET - OUTPUT_WORD_RESERVE;
-            const bodyByteBudget = effectivePartSize === Infinity
-                ? Infinity
-                : effectivePartSize - CHUNK_RESERVED_BYTES;
-            const hasCountLimit = Number.isFinite(effectiveMaxFiles) && effectiveMaxFiles !== Infinity;
-            let subParts = []; // { blocks: Array<string>, files: Array, bodyWords: number, bodyBytes: number }
-            let done = 0;
-            let cur = { blocks: [], files: [], bodyWords: 0, bodyBytes: 0 };
-            let curFileCount = 0;
-            let curLastGlobal = -1;
-            const flushCur = () => {
-                if (cur.blocks.length) subParts.push(cur);
-                cur = { blocks: [], files: [], bodyWords: 0, bodyBytes: 0 };
-                curFileCount = 0;
-                curLastGlobal = -1;
-            };
-
-            for (let gi = 0; gi < groups.length; gi++) {
-                const tmpBlocks = [];
-                const tmpFiles = [];
-
-                for (const idx of groups[gi]) {
-                    const item = targets[idx];
-                    if (onProgress && done % 50 === 0) {
-                        onProgress(done, targets.length);
-                        await new Promise(r => setTimeout(r, 0));
-                    }
-                    done++;
-
-                    let content;
-                    try {
-                        const file = await readEntryFile(item.entry);
-                        if (maxSingleFileSize && file.size > maxSingleFileSize) continue; // 実測フォールバック
-                        const buf = await file.arrayBuffer();
-                        content = this._decodeToUtf8(new Uint8Array(buf));
-                    } catch {
-                        continue;
-                    }
-
-                    // RAG対策: パート上限を超える単一ファイルはチャンク分割し、
-                    // 各断片にパス付き見出しを付けて帰属を保持する。
-                    // バイト・文字の両予算で分割し、断片は複数パートへ分散する。
-                    const rawPieces = _splitContentDualWords(content, chunkByteBudget, SINGLE_BLOCK_WORD_BUDGET, encoder);
-                    // chunkLabel は最終的な総断片数で付け直すため、ここでは仮採番しない
-                    rawPieces.forEach((piece) => {
-                        tmpBlocks.push({ item, piece, contentLen: content.length, idx });
-                    });
-                }
-
-                // 総断片数を確定して chunkLabel を付与し、OKFブロック化する
-                // 同一ファイルの断片がグループを跨いで分離しても label が壊れないよう
-                // グループ内で同一パスの出現回数を数える
-                const pathCounts = new Map();
-                for (const b of tmpBlocks) pathCounts.set(b.item.relativePath, (pathCounts.get(b.item.relativePath) || 0) + 1);
-                const pathSeen = new Map();
-                const builtBlocks = [];
-                const builtFiles = [];
-                for (const b of tmpBlocks) {
-                    const total = pathCounts.get(b.item.relativePath) || 1;
-                    const seen = (pathSeen.get(b.item.relativePath) || 0) + 1;
-                    pathSeen.set(b.item.relativePath, seen);
-                    const chunkLabel = total > 1 ? `split ${seen}/${total}` : null;
-                    builtBlocks.push(this._buildOKFFileBlock(b.item, b.piece, { chunkLabel }));
-                    builtFiles.push({
-                        path: b.item.relativePath,
-                        project: b.item.projectName || '',
-                        filter: b.item.filter || '',
-                        size: b.contentLen,
-                        globalIndex: b.idx + 1,
-                        chunk: chunkLabel
-                    });
-                }
-
-                // 単語数・バイト数・件数でサブパートへ梱包（cur はグループ跨ぎで継続し、末尾の微小パートを出さない）
-                for (let bi = 0; bi < builtBlocks.length; bi++) {
-                    const bl = builtBlocks[bi];
-                    const blWords = countWords(bl);
-                    const blBytes = encoder.encode(bl).length;
-                    const gidx = builtFiles[bi].globalIndex;
-                    const newFileCount = curFileCount + ((cur.blocks.length > 0 && gidx === curLastGlobal) ? 0 : 1);
-                    if (cur.blocks.length > 0 &&
-                        (cur.bodyWords + blWords > bodyWordBudget ||
-                         cur.bodyBytes + blBytes > bodyByteBudget ||
-                         (hasCountLimit && newFileCount > effectiveMaxFiles))) {
-                        flushCur();
-                    }
-                    // 単一ブロックが予算超えの場合はさらに内容を細分化するのではなく
-                    // そのまま単独パート化し、Phase 3 の実測検証で強制分割する
-                    cur.blocks.push(bl);
-                    cur.files.push(builtFiles[bi]);
-                    cur.bodyWords += blWords;
-                    cur.bodyBytes += blBytes;
-                    if (gidx !== curLastGlobal) { curFileCount++; curLastGlobal = gidx; }
-                    // 単独で予算超えのブロックは即フラッシュして次へ
-                    if (blWords > bodyWordBudget || blBytes > bodyByteBudget) flushCur();
-                }
-                // グループ末ではフラッシュしない（次のグループへ継続）。一時配列のみ破棄する。
-                tmpBlocks.length = 0;
-            }
-            flushCur();
-
-            if (onProgress) onProgress(targets.length, targets.length);
-
-            // 空（全件スキップ時）は出力しない
-            subParts = subParts.filter(sp => sp.blocks.length > 0);
-            if (!subParts.length) return { results: [], partFileList: [] };
-
-            // Phase 3: 実測検証ループ（全出力が50万語未満になるまで超過パートを半分に分割）
-            const buildFullText = (sp, partNum, totalParts, partGroups) => {
-                const body = sp.blocks.join('');
-                const frontmatter = this._buildOKFFrontmatter({
-                    rootName,
-                    partNum,
-                    totalParts,
-                    fileCount: sp.files.length,
-                    totalSizeBytes: encoder.encode(body).length,
-                    mode,
-                    entryPoints
-                });
-                const header = this._buildOKFHeader({
-                    rootName,
-                    partNum,
-                    totalParts,
-                    mode,
-                    projects,
-                    totalFiles: targets.length,
-                    currentPartFiles: sp.files,
-                    partGroups
-                });
-                return frontmatter + header + body;
-            };
-            const isOver = (text) => countWords(text) >= MAX_OUTPUT_WORDS;
-            // 末尾パートが極端に小さい場合は直前パートと均す（結合or単語数均等2分割）
-            const distinctFileCount = (files) => new Set(files.map(f => f.globalIndex)).size;
-            const blockWords = (blocks) => blocks.map(b => countWords(b));
-            const splitBalanced = (blocks, files) => {
-                const ws = blockWords(blocks);
-                const total = ws.reduce((s, x) => s + x, 0);
-                let acc = 0;
-                let mid = Math.ceil(blocks.length / 2);
-                for (let i = 0; i < blocks.length; i++) {
-                    acc += ws[i];
-                    if (acc >= total / 2) { mid = i + 1; break; }
-                }
-                mid = Math.max(1, Math.min(blocks.length - 1, mid));
-                const mk = (b, f) => ({
-                    blocks: b,
-                    files: f,
-                    bodyWords: b.reduce((s, x) => s + countWords(x), 0),
-                    bodyBytes: b.reduce((s, x) => s + encoder.encode(x).length, 0)
-                });
-                return [mk(blocks.slice(0, mid), files.slice(0, mid)),
-                        mk(blocks.slice(mid), files.slice(mid))];
-            };
-            const fixTinyTail = () => {
-                if (subParts.length < 2) return false;
-                const last = subParts[subParts.length - 1];
-                if (last.bodyWords >= bodyWordBudget * 0.5) return false;
-                const prev = subParts[subParts.length - 2];
-                const mBlocks = prev.blocks.concat(last.blocks);
-                const mFiles = prev.files.concat(last.files);
-                if (mBlocks.length <= 1) return false;
-                // 件数制限を壊す結合・再分割は行わない
-                if (hasCountLimit && distinctFileCount(mFiles) > effectiveMaxFiles) {
-                    const [h1, h2] = splitBalanced(mBlocks, mFiles);
-                    if (distinctFileCount(h1.files) > effectiveMaxFiles ||
-                        distinctFileCount(h2.files) > effectiveMaxFiles) return false;
-                    if (h1.blocks.length === prev.blocks.length) return false; // 進展なし
-                    subParts.splice(subParts.length - 2, 2, h1, h2);
-                    return true;
-                }
-                // 結合で収まるなら1パートにまとめる（実測で確認）
-                const trial = subParts.slice(0, -2).concat([{
-                    blocks: mBlocks, files: mFiles,
-                    bodyWords: mBlocks.reduce((s, x) => s + countWords(x), 0),
-                    bodyBytes: mBlocks.reduce((s, x) => s + encoder.encode(x).length, 0)
-                }]);
-                const tGroups = trial.map(sp => [...new Set(sp.files.map(f => f.path))]);
-                const mergedText = buildFullText(trial[trial.length - 1], trial.length, trial.length, tGroups);
-                if (!isOver(mergedText) &&
-                    (bodyByteBudget === Infinity || encoder.encode(mergedText).length <= effectivePartSize)) {
-                    subParts = trial;
-                    return true;
-                }
-                const [h1, h2] = splitBalanced(mBlocks, mFiles);
-                if (h1.blocks.length === prev.blocks.length) return false; // 進展なし
-                subParts.splice(subParts.length - 2, 2, h1, h2);
-                return true;
-            };
-
-            let guard = 0;
-            let tailFixed = false;
-            while (guard++ < 10000) {
-                const totalParts = subParts.length;
-                const partGroups = subParts.map(sp => [...new Set(sp.files.map(f => f.path))]);
-                let victim = -1;
-                const texts = [];
-                for (let i = 0; i < subParts.length; i++) {
-                    const t = buildFullText(subParts[i], i + 1, totalParts, partGroups);
-                    texts.push(t);
-                    if (victim === -1 && isOver(t)) victim = i;
-                }
-                if (victim === -1) {
-                    if (!tailFixed) { tailFixed = true; if (fixTinyTail()) continue; }
-                    break;
-                }
-                const sp = subParts[victim];
-                if (sp.blocks.length <= 1) {
-                    // 単一ブロックで超過: ブロック内容自体を半分に割って2ブロック化する
-                    // （OKF構造は崩れるが単語数保証を優先する最終手段。通常は到達しない）
-                    const b = sp.blocks[0];
-                    const mid = Math.floor(b.length / 2);
-                    const f = sp.files[0];
-                    const total = 2;
-                    const b1 = this._buildOKFFileBlock(
-                        { relativePath: f.path, projectName: f.project, filter: f.filter, size: f.size },
-                        b.slice(0, mid), { chunkLabel: `split 1/${total}` });
-                    const b2 = this._buildOKFFileBlock(
-                        { relativePath: f.path, projectName: f.project, filter: f.filter, size: f.size },
-                        b.slice(mid), { chunkLabel: `split 2/${total}` });
-                    subParts.splice(victim, 1,
-                        { blocks: [b1], files: [{ ...f, chunk: `split 1/${total}` }], bodyWords: countWords(b1), bodyBytes: encoder.encode(b1).length },
-                        { blocks: [b2], files: [{ ...f, chunk: `split 2/${total}` }], bodyWords: countWords(b2), bodyBytes: encoder.encode(b2).length });
-                } else {
-                    const mid = Math.ceil(sp.blocks.length / 2);
-                    const mk = (blocks, files) => ({
-                        blocks,
-                        files,
-                        bodyWords: blocks.reduce((s, x) => s + countWords(x), 0),
-                        bodyBytes: blocks.reduce((s, x) => s + encoder.encode(x).length, 0)
-                    });
-                    subParts.splice(victim, 1,
-                        mk(sp.blocks.slice(0, mid), sp.files.slice(0, mid)),
-                        mk(sp.blocks.slice(mid), sp.files.slice(mid)));
-                }
-            }
-
-            // 最終 Blob 化（この時点で totalParts 確定）
-            const totalParts = subParts.length;
-            const partGroups = subParts.map(sp => [...new Set(sp.files.map(f => f.path))]);
-            const results = [];
-            const partFileList = [];
-            for (let i = 0; i < subParts.length; i++) {
-                const fullText = buildFullText(subParts[i], i + 1, totalParts, partGroups);
-                partFileList.push(subParts[i].files);
-                results.push({
-                    filename: `${rootName}_src_${String(i + 1).padStart(3, '0')}_of_${String(totalParts).padStart(3, '0')}${cleanExt}`,
-                    blob: bomTextBlob(fullText, 'text/markdown;charset=utf-8')
-                });
-            }
-
-            return { results, partFileList };
-        },
-
-        // --- OKF Format Building Helpers ---
-
-        _buildOKFFrontmatter({ rootName, partNum, totalParts, fileCount, totalSizeBytes, mode, entryPoints }) {
-            const lines = [
-                '---',
-                'type: codebase_export',
-                'format_version: "1.0-okf"',
-                `title: "${rootName} Source Code Export (Part ${partNum}/${totalParts})"`,
-                'description: "Consolidated codebase export formatted for LLM agents"',
-                `export_mode: "${mode}"`,
-                `part_number: ${partNum}`,
-                `total_parts: ${totalParts}`,
-                `file_count: ${fileCount}`,
-                `total_size_bytes: ${totalSizeBytes}`,
-                `generated_at: "${new Date().toISOString()}"`
-            ];
-            if (entryPoints && entryPoints.length > 0) {
-                lines.push('entry_points:');
-                for (const ep of entryPoints) {
-                    lines.push(`  - "${ep}"`);
-                }
-            }
-            lines.push('---', '');
-            return lines.join('\n');
-        },
-
-        _buildOKFHeader({ rootName, partNum, totalParts, mode, projects, totalFiles, currentPartFiles, partGroups }) {
-            const lines = [];
-            lines.push(`# Project Overview & Structure`);
-            lines.push(`- **Root Workspace**: \`${rootName}\``);
-            lines.push(`- **Export Mode**: \`${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'}\``);
-            lines.push(`- **Total Project Files**: ${totalFiles} | **Files in Part ${partNum}/${totalParts}**: ${new Set(currentPartFiles.map(f => f.path)).size}`);
-            lines.push(`- **Note**: See \`index.md\` (or \`index_001_of_N.md\`) for complete directory structure, all files index, and part mapping.\n`);
-
-            if (mode === 'vcxproj' && projects && projects.length > 0) {
-                lines.push(`## Build Units (Visual Studio Projects)`);
-                for (const p of projects) {
-                    lines.push(`### Project: ${p.name}`);
-                    lines.push(`- **Path**: \`${p.path}\``);
-                    if (p.configurations.length) lines.push(`- **Configs**: \`${p.configurations.join(', ')}\``);
-                    if (p.defines.length) lines.push(`- **Defines**: \`${p.defines.slice(0, 15).join('; ')}${p.defines.length > 15 ? '...' : ''}\``);
-                    if (p.includeDirs.length) lines.push(`- **Include Dirs**: \`${p.includeDirs.slice(0, 10).join('; ')}${p.includeDirs.length > 10 ? '...' : ''}\``);
-                    lines.push(`- **File Counts**: Sources (${p.sourceFiles.length}) | Headers (${p.headerFiles.length}) | Resources (${p.resourceFiles.length})`);
-                    lines.push('');
-                }
-            }
-
-            // Compact File Index: only current part files in detail
-            lines.push(`## File Index — Part ${partNum} of ${totalParts}`);
-            lines.push('');
-            lines.push('| # | Path | Size |');
-            lines.push('|---|---|---|');
-            for (const f of currentPartFiles) {
-                const projTag = f.project ? ` [${f.project}]` : '';
-                const chunkTag = f.chunk ? ` (${f.chunk})` : '';
-                lines.push(`| ${f.globalIndex} | \`${f.path}\`${chunkTag}${projTag} | ${formatBytes(f.size)} |`);
-            }
-            lines.push('');
-
-            // Directory Subtree of this part（パート単体でも構造が失われない）
-            const partPaths = currentPartFiles.map(f => f.path);
-            lines.push(`## Directory Subtree — Part ${partNum} of ${totalParts}`);
-            lines.push('');
-            lines.push('```');
-            lines.push(_buildSubtree(partPaths));
-            lines.push('```');
-            lines.push('');
-
-            // Compact cross-part map（パート数が少ない場合のみ）
-            if (partGroups && partGroups.length > 1 && partGroups.length <= PARTS_MAP_MAX) {
-                lines.push(`## Parts Map — All ${totalParts} Parts`);
-                lines.push('');
-                partGroups.forEach((g, gi) => {
-                    const dirs = {};
-                    for (const rel of g) {
-                        const d = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.';
-                        dirs[d] = (dirs[d] || 0) + 1;
-                    }
-                    const top = Object.entries(dirs).sort((a, b) => b[1] - a[1]).slice(0, 3)
-                        .map(([d, c]) => `\`${d}/\` (${c})`).join(', ');
-                    const mark = (gi + 1 === partNum) ? ' **← this part**' : '';
-                    lines.push(`- Part ${gi + 1}/${totalParts}: ${g.length} files — ${top}${mark}`);
-                });
-                lines.push('');
-            }
-
-            lines.push('---', '', '# Source Code Section', '');
-
-            return lines.join('\n');
-        },
-
-        _buildOKFFileBlock(item, content, opts) {
-            const chunkLabel = (opts && opts.chunkLabel) || '';
-            const lang = _detectLanguage(item.relativePath);
-            const folderPath = dirnameOf(item.relativePath);
-            const metaLines = [
-                `path: "${item.relativePath}"`,
-                `folder: "${folderPath}"`
-            ];
-            if (item.projectName) metaLines.push(`project: "${item.projectName}"`);
-            if (item.filter) metaLines.push(`filter: "${item.filter}"`);
-            metaLines.push(`extension: "${_getExtension(item.relativePath)}"`);
-            metaLines.push(`size_bytes: ${item.size}`);
-            if (chunkLabel) metaLines.push(`chunk: "${chunkLabel}"`);
-
-            // RAG対策: 本文がフェンス記号を含む場合は長いフェンスに自動切替し、
-            // ブロック構造の破損を防ぐ。末尾にパス付きフッターを付け、
-            // チャンク切断面のどちら側でも帰属が復元できるようにする。
-            const probe = metaLines.join('\n') + '\n' + content;
-            let fence = '```';
-            while (probe.includes(fence)) fence += '`';
-
-            return [
-                `## File: \`${item.relativePath}\`${chunkLabel ? ` (${chunkLabel})` : ''}`,
-                '',
-                `${fence}yaml`,
-                metaLines.join('\n'),
-                fence,
-                '',
-                `${fence}${lang}`,
-                content,
-                fence,
-                '',
-                `*End of file \`${item.relativePath}\`${chunkLabel ? ` (${chunkLabel})` : ''}*`,
-                '',
-                ''
-            ].join('\n');
-        },
-
-        _decodeToUtf8(uint8) {
-            try {
-                const text = new TextDecoder('utf-8', { fatal: true }).decode(uint8);
-                return text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text;
-            } catch { /* not UTF-8 */ }
-
-            try {
-                return new TextDecoder('shift_jis', { fatal: true }).decode(uint8);
-            } catch { /* not Shift_JIS */ }
-
-            try {
-                return new TextDecoder('euc-jp', { fatal: true }).decode(uint8);
-            } catch { /* not EUC-JP */ }
-
-            if (uint8.length >= 2) {
-                if (uint8[0] === 0xFF && uint8[1] === 0xFE) {
-                    try { return new TextDecoder('utf-16le').decode(uint8); } catch { }
-                }
-                if (uint8[0] === 0xFE && uint8[1] === 0xFF) {
-                    try { return new TextDecoder('utf-16be').decode(uint8); } catch { }
-                }
-            }
-
-            return new TextDecoder('utf-8', { fatal: false }).decode(uint8);
-        }
-    };
-
+    const { yamlFrontmatter, generatedMetadata, markdownText, markdownLink, DEFAULT_CONFIG, BLOCK_OVERHEAD_EST, SUBTREE_MAX_LINES, PARTS_MAP_MAX, CHUNK_RESERVED_BYTES, MAX_OUTPUT_WORDS, OUTPUT_WORD_TARGET, OUTPUT_WORD_RESERVE, SINGLE_BLOCK_WORD_BUDGET, INDEX_SHARD_HEAD_EST_WORDS, _splitContent, countWords, _splitContentByWords, _splitContentDualWords, createExcludeMatcher, assignParts, _buildSubtree, _buildIndexShardHead, VcxprojParser, _getExtension, _fuzzyMatchProject, _detectEntryPoints, _detectLanguage } = FileFlow.exportCommon;
+    const SourceConsolidator = FileFlow.SourceConsolidator;
+    const { _shardCsvRows, _shardTargetFilesCsv, _shardFolderStructureCsv, _shardVcxprojCsv, _generateTargetFilesCsv, _generateFolderStructureCsv, _generateVcxprojCsv, _generateIndexMd } = FileFlow.exportFormat;
     // =====================================================================
     //  Export Orchestrator — Scans, parses vcxproj, previews & exports
     // =====================================================================
@@ -873,6 +22,7 @@
         const vcxprojEntries = [];
         const filterEntries = [];
         const allFileEntries = [];
+        const scanErrors = [];
 
         await FS.traverse(roots, async entry => {
             if (entry.isFile) {
@@ -885,7 +35,7 @@
                 allFileEntries.push(entry);
             }
             return true;
-        }, { excludeDots: State.appSettings.excludeDots });
+        }, { excludeDots: State.appSettings.excludeDots, onError(entry,error) { scanErrors.push({ path: entry.fullPath, status: 'failed', reason: 'directory-read: ' + String(error.message || error) }); } });
 
         const projects = [];
         const projectFileMap = new Map();
@@ -925,14 +75,14 @@
                 }
             } catch (e) {
                 console.warn('Failed to parse vcxproj:', entry.fullPath, e);
+                scanErrors.push({ path: entry.fullPath, status: 'failed', reason: 'project-parse: ' + String(e.message || e) });
             }
         }
 
         const fileItems = [];
         const allFilesInfo = [];  // All files including binaries (for index.md)
         let totalSizeBytes = 0;
-        const isSingleRoot = roots.length === 1 && roots[0].isDirectory;
-        const rootPrefix = isSingleRoot ? roots[0].fullPath : '';
+        const rootNames = roots.map(root => root.name || '');
         // ツールバーのGlobフィルタを尊重する（空なら全件）
         const globMatcher = Glob.createMatcher(State.searchQuery);
         const activeFilterLabel = State.searchQuery && State.searchQuery.trim()
@@ -944,9 +94,7 @@
         for (const entry of allFileEntries) {
             const ext = _getExtension(entry.name);
 
-            const relativePath = rootPrefix
-                ? entry.fullPath.replace(rootPrefix + '/', '').replace(rootPrefix, '')
-                : entry.fullPath.replace(/^\//, '');
+            const relativePath = FileFlow.utils.Entries.buildRelPath(entry, rootNames) || entry.name;
 
             if (globMatcher && !globMatcher(entry.name, relativePath)) continue;
 
@@ -993,7 +141,7 @@
         fileItems.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
         allFilesInfo.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
-        return { projects, fileItems, allFilesInfo, totalSizeBytes, activeFilterLabel };
+        return { projects, fileItems, allFilesInfo, totalSizeBytes, activeFilterLabel, scanErrors };
     }
 
     async function showVcxprojPreviewModal() {
@@ -1021,7 +169,7 @@
      * @param {object} options
      * @param {Array<string>|null} options.selectedProjectNames
      * @param {string} options.mode - 'vcxproj' | 'folder_structure'
-     * @param {string} options.ext - '.md' | '.txt'
+     * @param {string} options.ext - '.md' (OKF v0.2)
      * @param {number} options.maxPartSizeBytes - bytes (0 or Infinity for unsplit)
      * @param {number} options.maxFilesPerPart - files (0 or Infinity for unlimited)
      */
@@ -1050,7 +198,7 @@
      * @param {object} options
      * @param {Array<string>|null} options.selectedProjectNames
      * @param {string} options.mode - 'vcxproj' | 'folder_structure'
-     * @param {string} options.ext - '.md' | '.txt'
+     * @param {string} options.ext - '.md' (OKF v0.2)
      * @param {number} options.maxPartSizeBytes - bytes (0 or Infinity for unsplit)
      * @param {number} options.maxFilesPerPart - files (0 or Infinity for unlimited)
      */
@@ -1063,6 +211,8 @@
             maxFilesPerPart = null
         } = typeof options === 'object' && !Array.isArray(options) ? options : { selectedProjectNames: options };
 
+        if (ext !== '.md' && ext !== 'md') throw new Error('OKF v0.2 concept documents must use .md');
+        const generatedAt = new Date().toISOString();
         const roots = State.currentRootEntries;
         if (!roots.length) {
             Status.error('No files loaded. Drop a folder first.');
@@ -1075,7 +225,7 @@
         Status.show('Preparing export data...', true);
         await new Promise(r => setTimeout(r, 20));
 
-        const { projects, fileItems: allItems, allFilesInfo } = await scanProjects();
+        const { projects, fileItems: allItems, allFilesInfo, scanErrors } = await scanProjects();
 
         let targetProjects = projects;
         let fileItems = allItems;
@@ -1096,9 +246,10 @@
 
         Status.show(`Consolidating ${fileItems.length.toLocaleString()} files (OKF Markdown)...`, true);
 
-        const { results, partFileList } = await SourceConsolidator.consolidate({
+        const { results, partFileList, report } = await SourceConsolidator.consolidate({
             fileItems,
             projects: targetProjects,
+            generatedAt,
             mode,
             ext,
             maxPartSize: maxPartSizeBytes,
@@ -1109,10 +260,15 @@
             }
         });
 
-        if (!results.length) {
-            Status.error('No source files to export (all skipped or empty).');
-            return;
-        }
+        const outcomes = new Map(report.map(r => [r.path, r]));
+        allFilesInfo.forEach(f => {
+            const outcome = outcomes.get(f.relativePath);
+            f.status = outcome ? outcome.status : (f.isExportTarget ? 'excluded' : (f.excluded ? 'excluded' : 'non-target'));
+            f.reason = outcome ? outcome.reason : (f.isExportTarget ? 'project-selection' : '');
+            f.isExportTarget = f.status === 'exported';
+        });
+        fileItems = fileItems.filter(f => outcomes.get(f.relativePath)?.status === 'exported');
+        const reportCsvs = _shardCsvRows('Path,Status,Reason', allFilesInfo.map(f => [f.relativePath, f.status, f.reason].map(csvEscape).join(',')).concat((scanErrors || []).map(r => [r.path,r.status,r.reason].map(csvEscape).join(','))), 'export_report.csv');
 
         // Generate index file(s) — sharded when exceeding the part-size limit
         Status.show('Generating index...', true);
@@ -1120,7 +276,7 @@
         const indexFiles = _generateIndexMd({
             rootName, mode, ext, allFilesInfo, fileItems,
             results, partFileList, projects: targetProjects,
-            maxIndexBytes: maxPartSizeBytes
+            maxIndexBytes: maxPartSizeBytes, generatedAt
         });
 
         // Generate CSV files based on mode (all sharded to < 500k words)
@@ -1143,7 +299,7 @@
             for (const r of results) {
                 zip.file(r.filename, r.blob);
             }
-            for (const c of secondaryCsvs) {
+            for (const c of reportCsvs.concat(secondaryCsvs)) {
                 zip.file(c.filename, c.blob);
             }
             for (const c of targetFilesCsvs) {
@@ -1152,7 +308,8 @@
 
             const zipBlob = await zip.generateAsync({ type: 'blob' });
             downloadBlob(zipBlob, `${rootName}_llm_export.zip`);
-            Status.show(`Exported ZIP: ${indexFiles.length} index file(s) + ${results.length} part(s) + ${secondaryCsvs.length + targetFilesCsvs.length} CSVs (${formatBytes(zipBlob.size)})`);
+            const failed = report.filter(r => r.status === 'failed').length + (scanErrors || []).length;
+            Status.show(`Exported ZIP (${fileItems.length} files, ${failed} failed; see export_report.csv): ${indexFiles.length} index file(s) + ${results.length} part(s) + ${secondaryCsvs.length + targetFilesCsvs.length} CSVs (${formatBytes(zipBlob.size)})`);
         } catch (e) {
             console.warn('ZIP creation failed, downloading files individually:', e);
             for (const idx of indexFiles) {
@@ -1163,7 +320,7 @@
                 downloadBlob(r.blob, r.filename);
                 await new Promise(res => setTimeout(res, 300));
             }
-            for (const c of secondaryCsvs) {
+            for (const c of reportCsvs.concat(secondaryCsvs)) {
                 downloadBlob(c.blob, c.filename);
                 await new Promise(res => setTimeout(res, 300));
             }
@@ -1177,523 +334,22 @@
 
     // =====================================================================
     //  CSV Generators (all outputs guaranteed < 500k words via sharding)
-    // =====================================================================
-
-    /**
-     * CSV行群を単語数ターゲットでシャード分割する（ヘッダは各シャードに複製）。
-     * 単一時は [{filename: baseName, blob}]、複数時は `${stem}_001_of_N.csv` …。
-     * @returns {Array<{filename: string, blob: Blob}>}
-     */
-    function _shardCsvRows(headerLine, rowLines, baseName) {
-        const target = OUTPUT_WORD_TARGET;
-        const headerWords = countWords(headerLine) + 1;
-        const shards = [];
-        let cur = [];
-        let curWords = headerWords;
-        for (const row of rowLines) {
-            const rw = countWords(row) + 1;
-            if (cur.length > 0 && curWords + rw > target) {
-                shards.push(cur);
-                cur = [];
-                curWords = headerWords;
-            }
-            cur.push(row);
-            curWords += rw;
-        }
-        if (cur.length || shards.length === 0) shards.push(cur);
-
-        // 末尾シャードが極端に小さい場合は直前と均す（結合or均等2分割）
-        if (shards.length >= 2) {
-            const wordsOf = (rows) => rows.reduce((s, r) => s + countWords(r) + 1, 0);
-            const lastWords = wordsOf(shards[shards.length - 1]);
-            if (lastWords < target * 0.5) {
-                const prev = shards[shards.length - 2];
-                const combined = prev.concat(shards[shards.length - 1]);
-                const mergedText = headerLine + '\n' + combined.join('\n') + '\n';
-                if (countWords(mergedText) < MAX_OUTPUT_WORDS) {
-                    shards.splice(shards.length - 2, 2, combined);
-                } else if (combined.length > 2) {
-                    // 単語数で均等に2分割する
-                    const total = wordsOf(combined);
-                    let acc = 0, mid = Math.ceil(combined.length / 2);
-                    for (let i = 0; i < combined.length; i++) {
-                        acc += countWords(combined[i]) + 1;
-                        if (acc >= total / 2) { mid = i + 1; break; }
-                    }
-                    mid = Math.max(1, Math.min(combined.length - 1, mid));
-                    shards.splice(shards.length - 2, 2, combined.slice(0, mid), combined.slice(mid));
-                }
-            }
-        }
-
-        // 実測検証。超過シャードは半分に再分割する。
-        let guard = 0;
-        while (guard++ < 1000) {
-            let victim = -1;
-            const texts = shards.map(rows => headerLine + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n'));
-            for (let i = 0; i < texts.length; i++) {
-                if (countWords(texts[i]) >= MAX_OUTPUT_WORDS && shards[i].length > 1) { victim = i; break; }
-            }
-            if (victim === -1) break;
-            const rows = shards[victim];
-            const mid = Math.ceil(rows.length / 2);
-            shards.splice(victim, 1, rows.slice(0, mid), rows.slice(mid));
-        }
-
-        const dot = baseName.lastIndexOf('.');
-        const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
-        const ext = dot > 0 ? baseName.slice(dot) : '.csv';
-        return shards.map((rows, si) => {
-            const text = headerLine + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
-            if (shards.length === 1) {
-                return { filename: baseName, blob: bomTextBlob(text, 'text/csv;charset=utf-8;') };
-            }
-            const num = String(si + 1).padStart(3, '0');
-            const total = String(shards.length).padStart(3, '0');
-            return { filename: `${stem}_${num}_of_${total}${ext}`, blob: bomTextBlob(text, 'text/csv;charset=utf-8;') };
-        });
-    }
-
-    function _buildVcxprojCsvRows(projects) {
-        const headers = ['Project Name', 'Project Path', 'Configurations', 'Sources', 'Headers', 'Resources', 'Preprocessor Defines', 'Include Directories'];
-        const escape = csvEscape;
-        const rows = projects.map(p => [
-            escape(p.name),
-            escape(p.path),
-            escape(p.configurations.join('; ')),
-            p.sourceFiles.length,
-            p.headerFiles.length,
-            p.resourceFiles.length,
-            escape(p.defines.join('; ')),
-            escape(p.includeDirs.join('; '))
-        ].join(','));
-        return { header: headers.join(','), rows };
-    }
-
-    function _buildFolderStructureCsvRows(fileItems) {
-        const headers = ['Folder Path', 'Parent Folder', 'Depth', 'File Count', 'Total Size (Bytes)'];
-        const escape = csvEscape;
-        const folderMap = new Map();
-        for (const item of fileItems) {
-            const folderPath = dirnameOf(item.relativePath);
-            if (!folderMap.has(folderPath)) {
-                const parts = folderPath === '.' ? [] : folderPath.split('/');
-                const parentFolder = parts.length > 1 ? parts.slice(0, -1).join('/') : (folderPath === '.' ? '' : '.');
-                folderMap.set(folderPath, {
-                    folderPath,
-                    parentFolder,
-                    depth: parts.length,
-                    fileCount: 0,
-                    totalSize: 0
-                });
-            }
-            const info = folderMap.get(folderPath);
-            info.fileCount++;
-            info.totalSize += (item.size || 0);
-        }
-        const rows = [...folderMap.values()].map(f => [
-            escape(f.folderPath),
-            escape(f.parentFolder),
-            f.depth,
-            f.fileCount,
-            f.totalSize
-        ].join(','));
-        return { header: headers.join(','), rows };
-    }
-
-    function _buildTargetFilesCsvRows(fileItems) {
-        const headers = ['File Path', 'Project Name', 'Filter Path', 'Size (Bytes)', 'Extension'];
-        const escape = csvEscape;
-        const rows = fileItems.map(item => [
-            escape(item.relativePath),
-            escape(item.projectName || ''),
-            escape(item.filter || ''),
-            item.size || 0,
-            escape(_getExtension(item.relativePath))
-        ].join(','));
-        return { header: headers.join(','), rows };
-    }
-
-    function _shardVcxprojCsv(projects, baseName = 'vcxproj_list.csv') {
-        const { header, rows } = _buildVcxprojCsvRows(projects);
-        return _shardCsvRows(header, rows, baseName);
-    }
-
-    function _shardFolderStructureCsv(fileItems, baseName = 'folder_structure.csv') {
-        const { header, rows } = _buildFolderStructureCsvRows(fileItems);
-        return _shardCsvRows(header, rows, baseName);
-    }
-
-    function _shardTargetFilesCsv(fileItems, baseName = 'target_files_list.csv') {
-        const { header, rows } = _buildTargetFilesCsvRows(fileItems);
-        return _shardCsvRows(header, rows, baseName);
-    }
-
-    function _generateVcxprojCsv(projects) {
-        const { header, rows } = _buildVcxprojCsvRows(projects);
-        const csvText = header + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
-        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
-    }
-
-    function _generateFolderStructureCsv(fileItems) {
-        const { header, rows } = _buildFolderStructureCsvRows(fileItems);
-        const csvText = header + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
-        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
-    }
-
-    function _generateTargetFilesCsv(fileItems) {
-        const { header, rows } = _buildTargetFilesCsvRows(fileItems);
-        const csvText = header + '\n' + (rows.length ? rows.join('\n') + '\n' : '\n');
-        return bomTextBlob(csvText, 'text/csv;charset=utf-8;');
-    }
-
-    // =====================================================================
-    //  index.md Generator — OKF Codebase Index for LLM
-    // =====================================================================
-
-    /**
-     * Generate OKF-compliant index file(s) — master table of contents.
-     * All-Filesテーブルが上限を超える場合は `index.md` + `index_files_*` に分割する。
-     * @returns {Array<{filename: string, blob: Blob}>}（単一時は [{filename:'index.md', blob}]）
-     */
-    function _generateIndexMd({ rootName, mode, ext, allFilesInfo, fileItems, results, partFileList, projects, maxIndexBytes }) {
-        const encoder = new TextEncoder();
-        const byteLimit = (maxIndexBytes && maxIndexBytes > 0) ? maxIndexBytes : Infinity;
-        const wordLimit = OUTPUT_WORD_TARGET;
-        const totalFiles = allFilesInfo.length;
-        const exportedFiles = allFilesInfo.filter(f => f.isExportTarget).length;
-        const binaryFiles = totalFiles - exportedFiles;
-        const totalSizeBytes = allFilesInfo.reduce((sum, f) => sum + f.size, 0);
-        const exportedSizeBytes = fileItems.reduce((sum, f) => sum + f.size, 0);
-        const totalParts = results.length;
-        const cleanExt = ext.startsWith('.') ? ext : '.' + ext;
-
-        // Build directory stats
-        const dirStats = new Map();
-        for (const f of allFilesInfo) {
-            const dir = dirnameOf(f.relativePath);
-            if (!dirStats.has(dir)) {
-                dirStats.set(dir, { files: 0, exported: 0, binary: 0, size: 0 });
-            }
-            const s = dirStats.get(dir);
-            s.files++;
-            s.size += f.size;
-            if (f.isExportTarget) s.exported++;
-            else s.binary++;
-        }
-
-        // Build file-to-part mapping（分割ファイルは複数パートに属する）
-        const filePartMap = new Map();
-        if (partFileList) {
-            for (let i = 0; i < partFileList.length; i++) {
-                for (const f of partFileList[i]) {
-                    if (!filePartMap.has(f.path)) filePartMap.set(f.path, []);
-                    const arr = filePartMap.get(f.path);
-                    if (!arr.includes(i + 1)) arr.push(i + 1);
-                }
-            }
-        }
-
-        // --- OKF YAML Frontmatter ---
-        const lines = [
-            '---',
-            'type: codebase_index',
-            'format_version: "1.0-okf"',
-            `title: "${rootName} — Codebase Index"`,
-            'description: "Complete directory and file index for LLM codebase analysis. Load this file first for structural context."',
-            `export_mode: "${mode}"`,
-            `total_files: ${totalFiles}`,
-            `total_directories: ${dirStats.size}`,
-            `total_size_bytes: ${totalSizeBytes}`,
-            `exported_text_files: ${exportedFiles}`,
-            `non_exported_files: ${binaryFiles}`,
-            `export_parts: ${totalParts}`,
-            `generated_at: "${new Date().toISOString()}"`,
-            '---',
-            ''
-        ];
-
-        // --- Summary ---
-        lines.push(`# ${rootName} — Codebase Index`);
-        lines.push('');
-        lines.push('> **Load this file first.** It provides the complete structural overview of the exported codebase.');
-        lines.push('> Other exported part files (`*_src_*${cleanExt}`) contain the actual source code.');
-        lines.push('');
-        lines.push('## Export Summary');
-        lines.push('');
-        lines.push('| Metric | Value |');
-        lines.push('|---|---|');
-        lines.push(`| Root Workspace | \`${rootName}\` |`);
-        lines.push(`| Export Mode | ${mode === 'vcxproj' ? 'Visual Studio (vcxproj)' : 'Folder Structure'} |`);
-        lines.push(`| Total Files | ${totalFiles.toLocaleString()} |`);
-        lines.push(`| Exported (Text) Files | ${exportedFiles.toLocaleString()} |`);
-        lines.push(`| Non-Exported Files | ${binaryFiles.toLocaleString()} |`);
-        lines.push(`| Total Size | ${formatBytes(totalSizeBytes)} |`);
-        lines.push(`| Exported Size | ${formatBytes(exportedSizeBytes)} |`);
-        lines.push(`| Export Parts | ${totalParts} file(s) |`);
-        lines.push('');
-
-        // --- Build Units (vcxproj mode) ---
-        if (mode === 'vcxproj' && projects && projects.length > 0) {
-            lines.push('## Build Units (Visual Studio Projects)');
-            lines.push('');
-            lines.push('| Project | Sources | Headers | Resources | Configs |');
-            lines.push('|---|---|---|---|---|');
-            for (const p of projects) {
-                const configs = p.configurations.length ? p.configurations.join(', ') : 'Default';
-                lines.push(`| \`${p.name}\` | ${p.sourceFiles.length} | ${p.headerFiles.length} | ${p.resourceFiles.length} | ${configs} |`);
-            }
-            lines.push('');
-
-            // Defines & Includes (compact)
-            for (const p of projects) {
-                if (p.defines.length || p.includeDirs.length) {
-                    lines.push(`### ${p.name}`);
-                    if (p.defines.length) {
-                        lines.push(`- **Defines**: \`${p.defines.join('; ')}\``);
-                    }
-                    if (p.includeDirs.length) {
-                        lines.push(`- **Include Dirs**: \`${p.includeDirs.join('; ')}\``);
-                    }
-                    lines.push('');
-                }
-            }
-        }
-
-        // --- Directory Structure Table ---
-        lines.push('## Directory Structure');
-        lines.push('');
-        lines.push('| Directory | Files | Exported | Non-Exported | Size |');
-        lines.push('|---|---|---|---|---|');
-
-        const sortedDirs = [...dirStats.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-        for (const [dir, s] of sortedDirs) {
-            lines.push(`| \`${dir}/\` | ${s.files} | ${s.exported} | ${s.binary} | ${formatBytes(s.size)} |`);
-        }
-        lines.push('');
-
-        // --- Export Parts Map ---
-        if (totalParts > 0) {
-            lines.push('## Export Parts Map');
-            lines.push('');
-            lines.push(`| Part | Filename | Files | Primary Directories |`);
-            lines.push('|---|---|---|---|');
-
-            for (let i = 0; i < partFileList.length; i++) {
-                const pFiles = partFileList[i];
-                const num = String(i + 1).padStart(3, '0');
-                const totalNum = String(totalParts).padStart(3, '0');
-                const filename = `${rootName}_src_${num}_of_${totalNum}${cleanExt}`;
-
-                // Aggregate directories
-                const dirCounts = new Map();
-                for (const f of pFiles) {
-                    const dir = dirnameOf(f.path);
-                    dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
-                }
-                const topDirs = [...dirCounts.entries()]
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 5)
-                    .map(([d, c]) => `\`${d}/\` (${c})`)
-                    .join(', ');
-
-                lines.push(`| ${i + 1} | \`${filename}\` | ${pFiles.length} | ${topDirs} |`);
-            }
-            lines.push('');
-        }
-
-        // --- Full File List（上限超過時はシャード分割） ---
-        const allRows = [];
-        for (let i = 0; i < allFilesInfo.length; i++) {
-            const f = allFilesInfo[i];
-            const type = f.excluded ? 'excluded' : (f.isExportTarget ? 'text' : 'binary');
-            const partsHit = filePartMap.get(f.relativePath);
-            const partStr = partsHit ? partsHit.join(', ') : '—';
-            allRows.push(`| ${i + 1} | \`${f.relativePath}\` | ${formatBytes(f.size)} | ${type} | ${partStr} |`);
-        }
-
-        let headText = lines.join('\n') + '\n';
-        const tableHead = ['## All Files', '', '| # | Path | Size | Type | Part |', '|---|---|---|---|---|'];
-        const tableHeadText = tableHead.join('\n') + '\n';
-
-        // ヘッダ単体で単語数ターゲット超えの場合は Directory Structure 行を間引いて保証する
-        const headFits = (h) => countWords(h) + countWords(tableHeadText) < wordLimit &&
-            (byteLimit === Infinity || encoder.encode(h).length + encoder.encode(tableHeadText).length < byteLimit);
-        if (!headFits(headText)) {
-            const dirHeaderIdx = lines.findIndex(l => l === '| Directory | Files | Exported | Non-Exported | Size |');
-            if (dirHeaderIdx !== -1) {
-                // ディレクトリ行範囲を特定（ヘッダ2行後〜空行まで）
-                let start = dirHeaderIdx + 2;
-                let end = start;
-                while (end < lines.length && lines[end] !== '') end++;
-                const total = end - start;
-                // 先頭から収まる分だけ残す
-                let keep = total;
-                while (keep > 0 && !headFits(lines.slice(0, start).join('\n') + '\n' +
-                    lines.slice(start, start + keep).join('\n') +
-                    `\n... (${total - keep} directories omitted to stay under 500k words)\n` +
-                    lines.slice(end).join('\n') + '\n')) {
-                    keep = Math.floor(keep / 2);
-                }
-                const omitted = total - keep;
-                const kept = lines.slice(start, start + keep);
-                if (omitted > 0) kept.push(`... (${omitted} directories omitted to stay under 500k words)`);
-                lines.splice(start, total, ...kept);
-                headText = lines.join('\n') + '\n';
-            }
-        }
-        const headBytes = encoder.encode(headText).length;
-        const tableHeadBytes = encoder.encode(tableHeadText).length;
-
-        // 行単位でシャード割付（バイト制限と単語数制限の厳しい方）
-        const headWords = countWords(headText);
-        const tableHeadWords = countWords(tableHeadText);
-        const shards = [];
-        let cur = [];
-        let curBytes = headBytes + tableHeadBytes;
-        let curWords = headWords + tableHeadWords;
-        const nextShardHeadBytes = tableHeadBytes + 1200;
-        const nextShardHeadWords = tableHeadWords + INDEX_SHARD_HEAD_EST_WORDS;
-        for (const row of allRows) {
-            const rb = encoder.encode(row + '\n').length;
-            const rw = countWords(row) + 1;
-            if (cur.length > 0 && (curBytes + rb > byteLimit || curWords + rw > wordLimit)) {
-                shards.push(cur);
-                cur = [];
-                curBytes = nextShardHeadBytes;
-                curWords = nextShardHeadWords;
-            }
-            cur.push(row);
-            curBytes += rb;
-            curWords += rw;
-        }
-        if (cur.length || shards.length === 0) shards.push(cur);
-
-        // 末尾シャードが極端に小さい場合は直前と均す（結合or均等2分割）
-        if (shards.length >= 2) {
-            const rowsWordsOf = (rows) => rows.reduce((s, r) => s + countWords(r) + 1, 0);
-            if (rowsWordsOf(shards[shards.length - 1]) < wordLimit * 0.5) {
-                const combined = shards[shards.length - 2].concat(shards[shards.length - 1]);
-                const trialLen = shards.length - 1;
-                let masterTrial = headText;
-                if (trialLen > 1) {
-                    masterTrial = headText.replace('| Export Parts |',
-                        `| Index Shard Files | ${trialLen} file(s) (\`index.md\` + \`index_files_*\`) |\n| Export Parts |`);
-                }
-                const mergedText = trialLen === 1
-                    ? masterTrial + tableHeadText + combined.join('\n') + '\n'
-                    : _buildIndexShardHead(rootName, trialLen, trialLen) + tableHeadText + combined.join('\n') + '\n';
-                if (countWords(mergedText) < MAX_OUTPUT_WORDS &&
-                    (byteLimit === Infinity || encoder.encode(mergedText).length <= byteLimit)) {
-                    shards.splice(shards.length - 2, 2, combined);
-                } else if (combined.length > 2) {
-                    const total = rowsWordsOf(combined);
-                    let acc = 0, mid = Math.ceil(combined.length / 2);
-                    for (let i = 0; i < combined.length; i++) {
-                        acc += countWords(combined[i]) + 1;
-                        if (acc >= total / 2) { mid = i + 1; break; }
-                    }
-                    mid = Math.max(1, Math.min(combined.length - 1, mid));
-                    shards.splice(shards.length - 2, 2, combined.slice(0, mid), combined.slice(mid));
-                }
-            }
-        }
-
-        // 実測検証：各シャードの最終テキストが50万語未満になるまで半分に再分割する
-        const buildShardTextForCheck = (rows, si, totalShards, masterHead) => {
-            if (totalShards === 1) return masterHead + tableHeadText + rows.join('\n') + '\n';
-            if (si === 0) return masterHead + tableHeadText + rows.join('\n') + '\n';
-            const shardNum = si + 1;
-            const shardHead = _buildIndexShardHead(rootName, shardNum, totalShards);
-            return shardHead + tableHeadText + rows.join('\n') + '\n';
-        };
-        let guard = 0;
-        while (guard++ < 1000) {
-            let masterHeadTmp = headText;
-            if (shards.length > 1) {
-                masterHeadTmp = headText.replace('| Export Parts |',
-                    `| Index Shard Files | ${shards.length} file(s) (\`index.md\` + \`index_files_*\`) |\n| Export Parts |`);
-            }
-            let victim = -1;
-            for (let i = 0; i < shards.length; i++) {
-                const t = buildShardTextForCheck(shards[i], i, shards.length, masterHeadTmp);
-                if (countWords(t) >= MAX_OUTPUT_WORDS ||
-                    (byteLimit !== Infinity && encoder.encode(t).length > byteLimit && shards[i].length > 1)) {
-                    if (shards[i].length > 1) { victim = i; break; }
-                }
-            }
-            if (victim === -1) break;
-            const rows = shards[victim];
-            const mid = Math.ceil(rows.length / 2);
-            shards.splice(victim, 1, rows.slice(0, mid), rows.slice(mid));
-        }
-
-        let masterHeadText = headText;
-        if (shards.length > 1) {
-            masterHeadText = headText.replace('| Export Parts |',
-                `| Index Shard Files | ${shards.length} file(s) (\`index.md\` + \`index_files_*\`) |\n| Export Parts |`);
-        }
-
-        const indexFiles = shards.map((rows, si) => {
-            const shardNum = si + 1;
-            if (shards.length === 1) {
-                return { filename: 'index.md', blob: bomTextBlob(masterHeadText + tableHeadText + rows.join('\n') + '\n', 'text/markdown;charset=utf-8') };
-            }
-            if (si === 0) {
-                return { filename: 'index.md', blob: bomTextBlob(masterHeadText + tableHeadText + rows.join('\n') + '\n', 'text/markdown;charset=utf-8') };
-            }
-            const shardHead = _buildIndexShardHead(rootName, shardNum, shards.length);
-            const num = String(shardNum).padStart(3, '0');
-            const totalNum = String(shards.length).padStart(3, '0');
-            return { filename: `index_files_${num}_of_${totalNum}.md`, blob: bomTextBlob(shardHead + tableHeadText + rows.join('\n') + '\n', 'text/markdown;charset=utf-8') };
-        });
-        // index.md の Export Summary にシャード数を反映させる（単一時は従来通り）
-        return indexFiles;
-    }
-
-    // =====================================================================
-    //  Helper Functions
-    // =====================================================================
-
-    function _detectEntryPoints(fileItems) {
-        const targets = new Set([
-            'main.cpp', 'main.c', 'main.py', 'main.go', 'main.rs', 'main.js', 'main.ts',
-            'index.js', 'index.ts', 'index.html', 'app.js', 'app.py', 'app.ts', 'server.js', 'server.ts',
-            'cmakelists.txt', 'package.json', 'cargo.toml', 'go.mod', 'makefile', 'pyproject.toml',
-            'requirements.txt', 'build.gradle', 'pom.xml'
-        ]);
-        const entryPoints = [];
-        for (const item of fileItems) {
-            const name = item.relativePath.split('/').pop().toLowerCase();
-            if (targets.has(name) || name.endsWith('.vcxproj') || name.endsWith('.sln')) {
-                entryPoints.push(item.relativePath);
-            }
-        }
-        return entryPoints.slice(0, 15);
-    }
-
-    function _detectLanguage(filename) {
-        const ext = filename.split('.').pop().toLowerCase();
-        const map = {
-            'cpp': 'cpp', 'c': 'c', 'cc': 'cpp', 'cxx': 'cpp', 'h': 'cpp', 'hpp': 'cpp', 'hxx': 'cpp', 'inl': 'cpp',
-            'cs': 'csharp', 'java': 'java', 'py': 'python', 'js': 'javascript', 'ts': 'typescript',
-            'jsx': 'javascript', 'tsx': 'typescript', 'xml': 'xml', 'xaml': 'xml', 'json': 'json',
-            'yml': 'yaml', 'yaml': 'yaml', 'sql': 'sql', 'proto': 'protobuf', 'thrift': 'thrift',
-            'hlsl': 'hlsl', 'glsl': 'glsl', 'fx': 'hlsl', 'cmake': 'cmake', 'mk': 'makefile', 'mak': 'makefile',
-            'bat': 'bat', 'cmd': 'bat', 'sh': 'bash', 'ps1': 'powershell', 'txt': 'plaintext', 'md': 'markdown',
-            'rst': 'rst', 'cfg': 'ini', 'ini': 'ini', 'conf': 'ini', 'toml': 'toml',
-            'sln': 'plaintext', 'vcxproj': 'xml', 'csproj': 'xml', 'props': 'xml', 'targets': 'xml'
-        };
-        return map[ext] || 'text';
+    function normalizeSettings(saved) {
+        const out = { ...saved };
+        const positive = (value, fallback, min, max) => value !== '' && value !== null && Number.isFinite(Number(value)) && Number(value) >= min && Number(value) <= max ? Number(value) : fallback;
+        out.maxPartSizeMB = positive(saved.maxPartSizeMB, 4, 0.01, 50);
+        out.maxSingleFileSizeMB = positive(saved.maxSingleFileSizeMB, 1, 0.01, 10);
+        out.maxFilesPerPart = Math.floor(positive(saved.maxFilesPerPart, 1000, 0, 100000));
+        return out;
     }
 
     function getExportConfig() {
         // 旧キー notebookLMConfig からの移行に対応
-        const saved = State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {};
+        const saved = normalizeSettings(State.appSettings.llmExportConfig || State.appSettings.notebookLMConfig || {});
         const maxFilesRaw = saved.maxFilesPerPart;
         return {
             mode: saved.mode || DEFAULT_CONFIG.mode,
-            ext: saved.ext || DEFAULT_CONFIG.ext,
+            ext: '.md',
             maxPartSizeBytes: saved.maxPartSizeMB
                 ? saved.maxPartSizeMB * 1024 * 1024
                 : DEFAULT_CONFIG.maxPartSizeBytes,
@@ -1722,27 +378,13 @@
 
     // 照合用正規化は core の共有ヘルパーを使用する。
 
-    function _getExtension(name) {
-        const idx = name.lastIndexOf('.');
-        return idx > 0 ? name.slice(idx).toLowerCase() : '';
-    }
-
-    function _fuzzyMatchProject(entry, projectFileMap) {
-        const name = entry.name.toLowerCase();
-        for (const [path, ref] of projectFileMap) {
-            if (path.endsWith('/' + name) || path === name) {
-                return ref;
-            }
-        }
-        return null;
-    }
-
     // Export Public API
     FileFlow.llmExport = {
         scanProjects,
         showVcxprojPreviewModal,
         exportForLLM,
         getExportConfig,
+        normalizeSettings,
         getDefaultExtensionsString,
         getDefaultExcludesString,
         VcxprojParser,
